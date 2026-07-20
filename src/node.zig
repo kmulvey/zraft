@@ -778,7 +778,9 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
                     try self.broadcastAppendEntries(0);
                 }
                 // Track heartbeat responses for ReadIndex quorum confirmation (§8).
-                if (self.responses_needed_for_read > 0) {
+                // Only count responses from servers in active_config — joint-only
+                // servers don't count toward the active quorum.
+                if (self.responses_needed_for_read > 0 and self.active_config.contains(peer)) {
                     self.responses_since_read += 1;
                     if (self.responses_since_read >= self.responses_needed_for_read) {
                         self.confirmed_read_round = self.pending_read_round;
