@@ -19,6 +19,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "test-replication", .path = "src/test_replication.zig" },
         .{ .name = "test-integration", .path = "src/test_integration.zig" },
         .{ .name = "test-snapshot", .path = "src/test_snapshot.zig" },
+        .{ .name = "test-snapshot-chunked", .path = "src/test_snapshot_chunked.zig" },
         .{ .name = "test-membership", .path = "src/test_membership.zig" },
         .{ .name = "test-pre-vote", .path = "src/test_pre_vote.zig" },
         .{ .name = "test-read-index", .path = "src/test_read_index.zig" },

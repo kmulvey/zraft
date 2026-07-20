@@ -64,8 +64,22 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
         responses_needed_for_read: usize = 0,
         next_index: []LogIndex = &.{},
         match_index: []LogIndex = &.{},
+        /// Per-peer snapshot send offset (0 = not started, snap_len = done).
+        snapshot_offset: []u64 = &.{},
         /// Parallel to next_index/match_index: server IDs in current peer set.
         peer_ids: []ServerId = &.{},
+
+        // ---- Snapshot receive (chunked transfer, §7) ----
+        /// Buffer for accumulating snapshot chunks on the follower.
+        snapshot_recv_buf: []u8 = &.{},
+        /// Bytes received so far into snapshot_recv_buf.
+        snapshot_recv_offset: u64 = 0,
+        /// Leader ID for the current in-progress snapshot receive.
+        snapshot_recv_leader: ServerId = 0,
+        /// Last included index from the first chunk of the current snapshot.
+        snapshot_recv_last_index: LogIndex = 0,
+        /// Last included term from the first chunk of the current snapshot.
+        snapshot_recv_last_term: Term = 0,
 
         last_heartbeat_ns: u64 = 0,
         election_start_ns: u64 = 0,
@@ -95,6 +109,7 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
             const peer_ids = try allocator.dupe(ServerId, config.peers);
             const next_index = try allocator.alloc(LogIndex, config.peers.len);
             const match_index = try allocator.alloc(LogIndex, config.peers.len);
+            const snapshot_offset = try allocator.alloc(u64, config.peers.len);
 
             var self = Self{
                 .allocator = allocator,
@@ -106,6 +121,7 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
                 .peer_ids = peer_ids,
                 .next_index = next_index,
                 .match_index = match_index,
+                .snapshot_offset = snapshot_offset,
                 .rng = std.Random.DefaultPrng.init(rng_seed),
             };
             self.current_term = self.storage.loadTerm();
@@ -119,7 +135,9 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
         pub fn deinit(self: *Self) void {
             self.allocator.free(self.next_index);
             self.allocator.free(self.match_index);
+            self.allocator.free(self.snapshot_offset);
             self.allocator.free(self.peer_ids);
+            if (self.snapshot_recv_buf.len > 0) self.allocator.free(self.snapshot_recv_buf);
             self.active_config.deinit(self.allocator);
             if (self.joint_config) |*jc| jc.deinit(self.allocator);
         }
@@ -349,14 +367,41 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
             if (req.term < self.current_term) return .{ .term = self.current_term, .success = false };
             if (req.term > self.current_term) try self.stepDown(req.term);
 
-            if (req.done) {
-                try self.storage.storeSnapshot(req.last_included_index, req.last_included_term, req.data);
-                try self.state_machine.restore(req.data);
-                try self.log.replaceWithSnapshot(req.last_included_index, req.last_included_term);
-                self.snapshot_index = req.last_included_index;
-                self.snapshot_term = req.last_included_term;
-                self.last_applied = req.last_included_index;
-                self.commit_index = @max(self.commit_index, req.last_included_index);
+            // Chunked snapshot receive: accumulate chunks based on offset.
+            if (req.offset == 0) {
+                // Start a new snapshot receive — free any previous partial buffer.
+                if (self.snapshot_recv_buf.len > 0) self.allocator.free(self.snapshot_recv_buf);
+                self.snapshot_recv_buf = try self.allocator.alloc(u8, req.data.len);
+                @memcpy(self.snapshot_recv_buf, req.data);
+                self.snapshot_recv_offset = req.data.len;
+                self.snapshot_recv_leader = req.leader_id;
+                self.snapshot_recv_last_index = req.last_included_index;
+                self.snapshot_recv_last_term = req.last_included_term;
+            } else if (req.offset == self.snapshot_recv_offset and req.leader_id == self.snapshot_recv_leader) {
+                // Continuation chunk: append to buffer.
+                const new_len = self.snapshot_recv_offset + req.data.len;
+                self.snapshot_recv_buf = try self.allocator.realloc(self.snapshot_recv_buf, new_len);
+                @memcpy(self.snapshot_recv_buf[self.snapshot_recv_offset..], req.data);
+                self.snapshot_recv_offset = new_len;
+                // Update last_included fields from the final chunk (they should be consistent).
+                self.snapshot_recv_last_index = req.last_included_index;
+                self.snapshot_recv_last_term = req.last_included_term;
+            }
+            // If offset doesn't match, this is a duplicate or out-of-order chunk — ignore it.
+
+            if (req.done and self.snapshot_recv_offset > 0) {
+                const data = self.snapshot_recv_buf;
+                defer self.allocator.free(data);
+                self.snapshot_recv_buf = &.{};
+                self.snapshot_recv_offset = 0;
+
+                try self.storage.storeSnapshot(self.snapshot_recv_last_index, self.snapshot_recv_last_term, data);
+                try self.state_machine.restore(data);
+                try self.log.replaceWithSnapshot(self.snapshot_recv_last_index, self.snapshot_recv_last_term);
+                self.snapshot_index = self.snapshot_recv_last_index;
+                self.snapshot_term = self.snapshot_recv_last_term;
+                self.last_applied = self.snapshot_recv_last_index;
+                self.commit_index = @max(self.commit_index, self.snapshot_recv_last_index);
                 self.election_start_ns = 0;
             }
             return .{ .term = self.current_term, .success = true };
@@ -536,17 +581,20 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
             const new_peer_ids = try self.allocator.dupe(ServerId, new_peers.items);
             var new_next = try self.allocator.alloc(LogIndex, n);
             var new_match = try self.allocator.alloc(LogIndex, n);
+            var new_snap_off = try self.allocator.alloc(u64, n);
 
-            // Copy over existing next/match for servers that persist, init new ones
+            // Copy over existing next/match/snapshot_offset for servers that persist, init new ones
             const last_idx = self.log.lastIndex() + 1;
             for (new_peer_ids, 0..) |pid, i| {
                 const old_idx = for (self.peer_ids, 0..) |op, j| { if (op == pid) break j; } else null;
                 if (old_idx) |oi| {
                     new_next[i] = self.next_index[oi];
                     new_match[i] = self.match_index[oi];
+                    new_snap_off[i] = self.snapshot_offset[oi];
                 } else {
                     new_next[i] = last_idx;
                     new_match[i] = 0;
+                    new_snap_off[i] = 0;
                 }
             }
 
@@ -554,9 +602,11 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
             self.allocator.free(self.peer_ids);
             self.allocator.free(self.next_index);
             self.allocator.free(self.match_index);
+            self.allocator.free(self.snapshot_offset);
             self.peer_ids = new_peer_ids;
             self.next_index = new_next;
             self.match_index = new_match;
+            self.snapshot_offset = new_snap_off;
         }
 
         // ===================================================================
@@ -599,23 +649,32 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
             for (self.peer_ids, 0..) |peer, i| {
                 const next = if (i < self.next_index.len) self.next_index[i] else 1;
 
-                // §7: If follower needs a snapshot, send that instead
+                // §7: If follower needs a snapshot, send chunks
                 if (next <= self.snapshot_index and next > 0) {
                     if (send_snap) |s| {
                         const snap = self.storage.loadSnapshot(self.allocator);
                         if (snap) |snapshot| {
                             var snap_mut = snapshot;
                             defer snap_mut.deinit(self.allocator);
+                            const snap_len = snap_mut.data.len;
+                            const offset = self.snapshot_offset[i];
+                            const chunk_size = @min(@as(u64, 256 * 1024), snap_len - offset);
+                            const done = offset + chunk_size >= snap_len;
                             s(peer, .{
                                 .term = self.current_term,
                                 .leader_id = self.config.id,
                                 .last_included_index = snap_mut.last_included_index,
                                 .last_included_term = snap_mut.last_included_term,
-                                .offset = 0,
-                                .data = snap_mut.data,
-                                .done = true,
+                                .offset = offset,
+                                .data = snap_mut.data[offset..][0..chunk_size],
+                                .done = done,
                             });
-                            self.next_index[i] = snap_mut.last_included_index + 1;
+                            if (done) {
+                                self.next_index[i] = snap_mut.last_included_index + 1;
+                                self.snapshot_offset[i] = 0;
+                            } else {
+                                self.snapshot_offset[i] = offset + chunk_size;
+                            }
                         }
                     }
                     continue;
