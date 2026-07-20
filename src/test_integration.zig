@@ -24,7 +24,7 @@ test "single node election timeout" {
     var log = try LogType.init(allocator, &mstore, 4);
     defer log.deinit();
     var sm_impl = TestSM{};
-    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
+    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
     defer node.deinit();
     try node.tick(200_000_000);
     try std.testing.expectEqual(types.Role.leader, node.role);
@@ -37,17 +37,17 @@ test "three node election basic" {
     var m1 = mem_storage.MemoryStorage.init(allocator); defer m1.deinit();
     var l1 = try LogType.init(allocator, &m1, 4); defer l1.deinit();
     var sm1 = TestSM{};
-    var n1 = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &l1, .{ .ptr = &sm1, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, m1.toStorage(), 12345);
+    var n1 = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &l1, .{ .ptr = &sm1, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, m1.toStorage(), 12345);
     defer n1.deinit();
     var m2 = mem_storage.MemoryStorage.init(allocator); defer m2.deinit();
     var l2 = try LogType.init(allocator, &m2, 4); defer l2.deinit();
     var sm2 = TestSM{};
-    var n2 = try NodeType.init(allocator, .{ .id = 2, .peers = &.{1, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &l2, .{ .ptr = &sm2, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, m2.toStorage(), 67890);
+    var n2 = try NodeType.init(allocator, .{ .id = 2, .peers = &.{1, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &l2, .{ .ptr = &sm2, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, m2.toStorage(), 67890);
     defer n2.deinit();
     var m3 = mem_storage.MemoryStorage.init(allocator); defer m3.deinit();
     var l3 = try LogType.init(allocator, &m3, 4); defer l3.deinit();
     var sm3 = TestSM{};
-    var n3 = try NodeType.init(allocator, .{ .id = 3, .peers = &.{1, 2}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &l3, .{ .ptr = &sm3, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, m3.toStorage(), 99999);
+    var n3 = try NodeType.init(allocator, .{ .id = 3, .peers = &.{1, 2}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &l3, .{ .ptr = &sm3, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, m3.toStorage(), 99999);
     defer n3.deinit();
 
     try n1.tick(200_000_000);
@@ -77,21 +77,21 @@ test "log replication across three nodes" {
     var m1 = mem_storage.MemoryStorage.init(allocator); defer m1.deinit();
     var l1 = try LogType.init(allocator, &m1, 4); defer l1.deinit();
     var sm1 = TestSM{};
-    var leader = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &l1, .{ .ptr = &sm1, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, m1.toStorage(), 12345);
+    var leader = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &l1, .{ .ptr = &sm1, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, m1.toStorage(), 12345);
     defer leader.deinit();
     leader.role = .leader; leader.current_term = 1;
 
     var m2 = mem_storage.MemoryStorage.init(allocator); defer m2.deinit();
     var l2 = try LogType.init(allocator, &m2, 4); defer l2.deinit();
     var sm2 = TestSM{};
-    var f1 = try NodeType.init(allocator, .{ .id = 2, .peers = &.{1, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &l2, .{ .ptr = &sm2, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, m2.toStorage(), 67890);
+    var f1 = try NodeType.init(allocator, .{ .id = 2, .peers = &.{1, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &l2, .{ .ptr = &sm2, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, m2.toStorage(), 67890);
     defer f1.deinit();
     f1.current_term = 1;
 
     var m3 = mem_storage.MemoryStorage.init(allocator); defer m3.deinit();
     var l3 = try LogType.init(allocator, &m3, 4); defer l3.deinit();
     var sm3 = TestSM{};
-    var f2 = try NodeType.init(allocator, .{ .id = 3, .peers = &.{1, 2}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &l3, .{ .ptr = &sm3, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, m3.toStorage(), 99999);
+    var f2 = try NodeType.init(allocator, .{ .id = 3, .peers = &.{1, 2}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &l3, .{ .ptr = &sm3, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, m3.toStorage(), 99999);
     defer f2.deinit();
     f2.current_term = 1;
 

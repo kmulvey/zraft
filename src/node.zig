@@ -71,6 +71,9 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
         // ===================================================================
 
         pub fn init(allocator: std.mem.Allocator, config: Config, log: *LogType, state_machine: StateMachine(SM), storage: StorageType, rng_seed: u64) !Self {
+            // Validate configuration before using it.
+            try config.validate();
+
             // Build initial cluster config from config.peers + self
             const initial_peers = try allocator.alloc(ServerId, config.peers.len + 1);
             initial_peers[0] = config.id;

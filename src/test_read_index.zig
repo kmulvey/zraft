@@ -37,7 +37,7 @@ test "readIndex returns NoCommittedEntryInTerm before any entry from term commit
     var log = try LogType.init(allocator, &mstore, 4);
     defer log.deinit();
     var sm_impl = TestSM{};
-    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
+    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
     defer node.deinit();
 
     // Force leader with term 2, no entry from term 2 committed yet
@@ -55,7 +55,7 @@ test "readIndex succeeds after no-op commits in single-node cluster" {
     var log = try LogType.init(allocator, &mstore, 4);
     defer log.deinit();
     var sm_impl = TestSM{};
-    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
+    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
     defer node.deinit();
 
     // Become leader — becomeLeader appends no-op and calls advanceCommitIndex
@@ -77,7 +77,7 @@ test "readIndex returns commit index matching committed entries" {
     var log = try LogType.init(allocator, &mstore, 4);
     defer log.deinit();
     var sm_impl = TestSM{};
-    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
+    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
     defer node.deinit();
 
     try node.becomeLeader();
@@ -109,7 +109,7 @@ test "lastApplied and commitIndex getters" {
     var log = try LogType.init(allocator, &mstore, 4);
     defer log.deinit();
     var sm_impl = TestSM{};
-    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
+    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
     defer node.deinit();
 
     try std.testing.expectEqual(@as(u64, 0), node.lastApplied());

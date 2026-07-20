@@ -22,7 +22,7 @@ test "append entries heartbeat accepted" {
     var mstore = mem_storage.MemoryStorage.init(allocator); defer mstore.deinit();
     var log = try LogType.init(allocator, &mstore, 4); defer log.deinit();
     var sm_impl = TestSM{};
-    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
+    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
     defer node.deinit();
     node.current_term = 2;
     const resp = try node.handleAppendEntries(.{ .term = 2, .leader_id = 2, .prev_log_index = 0, .prev_log_term = 0, .entries = &.{}, .leader_commit = 0 }, 100_000_000);
@@ -35,7 +35,7 @@ test "append entries rejected on old term" {
     var mstore = mem_storage.MemoryStorage.init(allocator); defer mstore.deinit();
     var log = try LogType.init(allocator, &mstore, 4); defer log.deinit();
     var sm_impl = TestSM{};
-    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
+    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
     defer node.deinit();
     node.current_term = 5;
     const resp = try node.handleAppendEntries(.{ .term = 3, .leader_id = 2, .prev_log_index = 0, .prev_log_term = 0, .entries = &.{}, .leader_commit = 0 }, 100_000_000);
@@ -47,7 +47,7 @@ test "follower appends entries from leader" {
     var mstore = mem_storage.MemoryStorage.init(allocator); defer mstore.deinit();
     var log = try LogType.init(allocator, &mstore, 4); defer log.deinit();
     var sm_impl = TestSM{};
-    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
+    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
     defer node.deinit();
     node.current_term = 1;
     const wire_entry = rpc.LogEntryWire{ .term = 1, .index = 1, .entry_type = .command, .data = "command" };
@@ -62,7 +62,7 @@ test "leader can append client commands" {
     var mstore = mem_storage.MemoryStorage.init(allocator); defer mstore.deinit();
     var log = try LogType.init(allocator, &mstore, 4); defer log.deinit();
     var sm_impl = TestSM{};
-    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
+    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
     defer node.deinit();
     node.role = .leader; node.current_term = 1;
     const idx = try node.clientAppend("my-command");
@@ -75,7 +75,7 @@ test "client append fails when not leader" {
     var mstore = mem_storage.MemoryStorage.init(allocator); defer mstore.deinit();
     var log = try LogType.init(allocator, &mstore, 4); defer log.deinit();
     var sm_impl = TestSM{};
-    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
+    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
     defer node.deinit();
     try std.testing.expectError(error.NotLeader, node.clientAppend("data"));
 }

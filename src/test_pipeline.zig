@@ -25,7 +25,7 @@ test "clientAppend immediately triggers broadcast" {
     defer log.deinit();
     var sm_impl = TestSM{};
 
-    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
+    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
     defer node.deinit();
     node.role = .leader;
     node.current_term = 1;
@@ -47,7 +47,7 @@ test "clientAppendBatch appends all entries with one broadcast" {
     defer log.deinit();
     var sm_impl = TestSM{};
 
-    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
+    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
     defer node.deinit();
     node.role = .leader;
     node.current_term = 1;
@@ -76,7 +76,7 @@ test "handleAppendEntriesResponse triggers pipeline on success" {
     var m1 = mem_storage.MemoryStorage.init(allocator); defer m1.deinit();
     var l1 = try LogType.init(allocator, &m1, 4); defer l1.deinit();
     var sm1 = TestSM{};
-    var leader = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &l1, .{ .ptr = &sm1, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, m1.toStorage(), 12345);
+    var leader = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &l1, .{ .ptr = &sm1, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, m1.toStorage(), 12345);
     defer leader.deinit();
 
     // Set up as leader with entries

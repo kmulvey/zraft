@@ -52,7 +52,7 @@ test "node starts pre-vote on election timeout" {
     var log = try LogType.init(allocator, &mstore, 4);
     defer log.deinit();
     var sm_impl = TestSM{};
-    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 67890);
+    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 67890);
     defer node.deinit();
     try node.tick(200_000_000);
     // Pre-vote: becomes pre_candidate without incrementing/persisting term
@@ -69,7 +69,7 @@ test "single node skips pre-vote and becomes leader via preVoteHaveQuorum" {
     var log = try LogType.init(allocator, &mstore, 4);
     defer log.deinit();
     var sm_impl = TestSM{};
-    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
+    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
     defer node.deinit();
     try node.tick(200_000_000);
     // Single node: pre-vote quorum (1 >= 1) immediately triggers real election,

@@ -94,13 +94,13 @@ test "pre-vote transitions to candidate on quorum" {
     var m1 = mem_storage.MemoryStorage.init(allocator); defer m1.deinit();
     var l1 = try LogType.init(allocator, &m1, 4); defer l1.deinit();
     var sm1 = TestSM{};
-    var n1 = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &l1, .{ .ptr = &sm1, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, m1.toStorage(), 12345);
+    var n1 = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &l1, .{ .ptr = &sm1, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, m1.toStorage(), 12345);
     defer n1.deinit();
 
     var m2 = mem_storage.MemoryStorage.init(allocator); defer m2.deinit();
     var l2 = try LogType.init(allocator, &m2, 4); defer l2.deinit();
     var sm2 = TestSM{};
-    var n2 = try NodeType.init(allocator, .{ .id = 2, .peers = &.{1, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &l2, .{ .ptr = &sm2, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, m2.toStorage(), 67890);
+    var n2 = try NodeType.init(allocator, .{ .id = 2, .peers = &.{1, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &l2, .{ .ptr = &sm2, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, m2.toStorage(), 67890);
     defer n2.deinit();
 
     // n1 becomes pre_candidate after tick
@@ -122,7 +122,7 @@ test "pre-vote stale peer term causes step down" {
     var m1 = mem_storage.MemoryStorage.init(allocator); defer m1.deinit();
     var l1 = try LogType.init(allocator, &m1, 4); defer l1.deinit();
     var sm1 = TestSM{};
-    var n1 = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &l1, .{ .ptr = &sm1, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, m1.toStorage(), 12345);
+    var n1 = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &l1, .{ .ptr = &sm1, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, m1.toStorage(), 12345);
     defer n1.deinit();
 
     // Become pre_candidate

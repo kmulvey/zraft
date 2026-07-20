@@ -31,7 +31,7 @@ test "clusterChangeRequest appends config entry as leader" {
     var log = try LogType.init(allocator, &mstore, 4);
     defer log.deinit();
     var sm_impl = TestSM{};
-    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{ 2, 3 }, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
+    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{ 2, 3 }, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
     defer node.deinit();
 
     // Force leader
@@ -56,7 +56,7 @@ test "not leader returns error" {
     var log = try LogType.init(allocator, &mstore, 4);
     defer log.deinit();
     var sm_impl = TestSM{};
-    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{ 2, 3 }, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
+    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{ 2, 3 }, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
     defer node.deinit();
 
     try std.testing.expectError(error.NotLeader, node.clusterChangeRequest(&.{ 1, 2, 3, 4 }));
@@ -69,7 +69,7 @@ test "initial active config contains self and peers" {
     var log = try LogType.init(allocator, &mstore, 4);
     defer log.deinit();
     var sm_impl = TestSM{};
-    var node = try NodeType.init(allocator, .{ .id = 2, .peers = &.{ 1, 3 }, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
+    var node = try NodeType.init(allocator, .{ .id = 2, .peers = &.{ 1, 3 }, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
     defer node.deinit();
 
     try std.testing.expect(node.active_config.contains(1));
@@ -88,7 +88,7 @@ test "follower learns leader config via AppendEntries" {
     var log_leader = try LogType.init(allocator, &mstore_leader, 4);
     defer log_leader.deinit();
     var sm_leader = TestSM{};
-    var leader = try NodeType.init(allocator, .{ .id = 1, .peers = &.{ 2, 3 }, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &log_leader, .{ .ptr = &sm_leader, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore_leader.toStorage(), 12345);
+    var leader = try NodeType.init(allocator, .{ .id = 1, .peers = &.{ 2, 3 }, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &log_leader, .{ .ptr = &sm_leader, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore_leader.toStorage(), 12345);
     defer leader.deinit();
 
     // Follower node
@@ -97,7 +97,7 @@ test "follower learns leader config via AppendEntries" {
     var log_follower = try LogType.init(allocator, &mstore_follower, 4);
     defer log_follower.deinit();
     var sm_follower = TestSM{};
-    var follower = try NodeType.init(allocator, .{ .id = 2, .peers = &.{ 1, 3 }, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &log_follower, .{ .ptr = &sm_follower, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore_follower.toStorage(), 67890);
+    var follower = try NodeType.init(allocator, .{ .id = 2, .peers = &.{ 1, 3 }, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &log_follower, .{ .ptr = &sm_follower, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore_follower.toStorage(), 67890);
     defer follower.deinit();
 
     // Serialize a config and pretend it's from index 5
