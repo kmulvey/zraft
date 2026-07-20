@@ -50,6 +50,18 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
 
         votes_received: u32 = 0,
         pre_votes_received: u32 = 0,
+
+        // ---- ReadIndex quorum confirmation (§8) ----
+        /// Commit index of the most recent ReadIndex call.
+        pending_read_commit: LogIndex = 0,
+        /// Monotonically increasing round number for each ReadIndex call.
+        pending_read_round: u64 = 1,
+        /// Highest read round confirmed by a quorum of heartbeat responses.
+        confirmed_read_round: u64 = 0,
+        /// Number of peers that have responded during the current read round.
+        responses_since_read: usize = 0,
+        /// How many peer responses are needed for quorum (quorum - 1, excluding self).
+        responses_needed_for_read: usize = 0,
         next_index: []LogIndex = &.{},
         match_index: []LogIndex = &.{},
         /// Parallel to next_index/match_index: server IDs in current peer set.
@@ -444,12 +456,34 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
             const last_committed_term = self.log.termAt(self.commit_index);
             if (last_committed_term < self.current_term) return error.NoCommittedEntryInTerm;
 
-            const read_commit = self.commit_index;
+            // Record the commit index and start a new confirmation round.
+            self.pending_read_commit = self.commit_index;
+            self.pending_read_round += 1;
+            self.responses_since_read = 0;
+            // We need (quorum - 1) peer responses excluding ourself.
+            self.responses_needed_for_read = self.active_config.quorum() - 1;
 
             // Broadcast a heartbeat to confirm leadership with the cluster.
             try self.broadcastAppendEntries(0);
 
-            return read_commit;
+            // If no peer responses are needed (single-node cluster), confirm immediately.
+            if (self.responses_needed_for_read == 0) {
+                self.confirmed_read_round = self.pending_read_round;
+            }
+
+            return self.pending_read_commit;
+        }
+
+        /// Returns true when the read at `commit_index` is safe to serve.
+        /// Safe means: a quorum of peers have responded to the heartbeat
+        /// confirming the leader's term, AND the state machine has been
+        /// applied at least up to `commit_index`.
+        pub fn isReadSafe(self: *const Self, commit: LogIndex) bool {
+            // Must have confirmed quorum for this or a later round
+            if (self.confirmed_read_round < self.pending_read_round) return false;
+            // Must have applied at least up to the recorded commit index
+            if (self.last_applied < commit) return false;
+            return true;
         }
 
         /// The highest log index that has been applied to the state machine.
@@ -536,7 +570,15 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
             self.voted_for = null;
             try self.storage.storeVotedFor(self.voted_for);
             self.votes_received = 0;
+            self.pre_votes_received = 0;
             self.election_start_ns = 0;
+            // Reset read tracking — leadership is lost. Increment past
+            // confirmed_read_round so isReadSafe returns false until a new
+            // readIndex round is confirmed.
+            self.pending_read_round += 1;
+            self.confirmed_read_round = 0;
+            self.responses_since_read = 0;
+            self.responses_needed_for_read = 0;
         }
 
         fn randomiseElectionTimeout(self: *Self) void {
@@ -668,6 +710,13 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
                 // to this follower instead of waiting for the next heartbeat.
                 if (self.next_index[peer_idx] <= self.log.lastIndex()) {
                     try self.broadcastAppendEntries(0);
+                }
+                // Track heartbeat responses for ReadIndex quorum confirmation (§8).
+                if (self.responses_needed_for_read > 0) {
+                    self.responses_since_read += 1;
+                    if (self.responses_since_read >= self.responses_needed_for_read) {
+                        self.confirmed_read_round = self.pending_read_round;
+                    }
                 }
             } else if (self.next_index[peer_idx] > 1) {
                 if (resp.conflict_term > 0) {
