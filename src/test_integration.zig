@@ -93,7 +93,7 @@ test "log replication across three nodes" {
     for ([2]*NodeType{ &f1, &f2 }) |f| {
         const slice = l1.sliceFrom(1);
         var wire_entries: [1]rpc.LogEntryWire = undefined;
-        wire_entries[0] = .{ .term = slice[0].term, .index = slice[0].index, .data = slice[0].data };
+        wire_entries[0] = .{ .term = slice[0].term, .index = slice[0].index, .entry_type = slice[0].entry_type, .data = slice[0].data };
         const resp = try f.handleAppendEntries(.{ .term = 1, .leader_id = 1, .prev_log_index = entry_idx - 1, .prev_log_term = l1.termAt(entry_idx - 1), .entries = &wire_entries, .leader_commit = entry_idx }, 100_000_000);
         try std.testing.expect(resp.success);
         try std.testing.expectEqual(@as(u64, 1), f.log.termAt(1));

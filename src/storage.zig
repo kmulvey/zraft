@@ -73,6 +73,7 @@ pub fn Storage(comptime T: type) type {
 pub const LogEntryOwned = struct {
     term: Term,
     index: LogIndex,
+    entry_type: types.EntryType,
     data: []const u8,
 
     pub fn deinit(self: *LogEntryOwned, allocator: std.mem.Allocator) void {

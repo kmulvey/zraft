@@ -218,7 +218,7 @@ pub const FileStorage = struct {
             if (entry_index == index) {
                 const data = if (data_len > 0) try allocator.alloc(u8, data_len) else &.{};
                 if (data_len > 0) _ = try file.preadAll(data, pos + 20);
-                return LogEntryOwned{ .term = entry_term, .index = entry_index, .data = data };
+                return LogEntryOwned{ .term = entry_term, .index = entry_index, .entry_type = .command, .data = data };
             }
             pos += 20 + data_len;
         }
@@ -276,7 +276,7 @@ pub const FileStorage = struct {
                 if (entry_index <= last_kept_index) {
                     const data = if (data_len > 0) try self.allocator.alloc(u8, data_len) else &.{};
                     if (data_len > 0) _ = try file.preadAll(data, pos + 20);
-                    try entries.append(self.allocator, LogEntryOwned{ .term = entry_term, .index = entry_index, .data = data });
+                    try entries.append(self.allocator, LogEntryOwned{ .term = entry_term, .index = entry_index, .entry_type = .command, .data = data });
                 }
                 pos += 20 + data_len;
             }

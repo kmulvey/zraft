@@ -47,7 +47,7 @@ pub const MemoryStorage = struct {
         for (ptr.entries.items) |entry| {
             if (entry.index == index) {
                 const data = allocator.dupe(u8, entry.data) catch return null;
-                return LogEntryOwned{ .term = entry.term, .index = entry.index, .data = data };
+                return LogEntryOwned{ .term = entry.term, .index = entry.index, .entry_type = entry.entry_type, .data = data };
             }
         }
         return null;
@@ -55,7 +55,7 @@ pub const MemoryStorage = struct {
 
     pub fn appendLogEntry(ptr: *MemoryStorage, entry: LogEntryOwned) !void {
         const data_copy = try ptr.allocator.dupe(u8, entry.data);
-        try ptr.entries.append(ptr.allocator, LogEntryOwned{ .term = entry.term, .index = entry.index, .data = data_copy });
+        try ptr.entries.append(ptr.allocator, LogEntryOwned{ .term = entry.term, .index = entry.index, .entry_type = entry.entry_type, .data = data_copy });
     }
 
     pub fn truncateLog(ptr: *MemoryStorage, last_kept_index: LogIndex) !void {

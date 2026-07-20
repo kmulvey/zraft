@@ -33,6 +33,11 @@ pub const AppendEntriesRequest = struct {
     prev_log_term: Term,
     entries: []const LogEntryWire,
     leader_commit: LogIndex,
+    /// The leader's current cluster configuration (§6). Sent as raw serialized bytes
+    /// (little-endian u64 server IDs). Follower uses this to learn of pending config changes.
+    leader_config: []const u8 = &.{},
+    /// The log index at which the leader's current config was committed.
+    leader_config_index: LogIndex = 0,
 };
 
 /// Wire representation of a log entry for RPC transport.
@@ -40,6 +45,7 @@ pub const AppendEntriesRequest = struct {
 pub const LogEntryWire = struct {
     term: Term,
     index: LogIndex,
+    entry_type: types.EntryType,
     data: []const u8,
 };
 

@@ -21,7 +21,7 @@ test "RequestVote round-trip" {
 
 test "AppendEntries wire format" {
     const rpc = raft.rpc;
-    const wire_entry = rpc.LogEntryWire{ .term = 1, .index = 1, .data = "hello" };
+    const wire_entry = rpc.LogEntryWire{ .term = 1, .index = 1, .entry_type = .command, .data = "hello" };
     try std.testing.expectEqual(@as(u64, 1), wire_entry.term);
     try std.testing.expectEqualStrings("hello", wire_entry.data);
 }

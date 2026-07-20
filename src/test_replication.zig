@@ -50,7 +50,7 @@ test "follower appends entries from leader" {
     var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
     defer node.deinit();
     node.current_term = 1;
-    const wire_entry = rpc.LogEntryWire{ .term = 1, .index = 1, .data = "command" };
+    const wire_entry = rpc.LogEntryWire{ .term = 1, .index = 1, .entry_type = .command, .data = "command" };
     const resp = try node.handleAppendEntries(.{ .term = 1, .leader_id = 2, .prev_log_index = 0, .prev_log_term = 0, .entries = &.{wire_entry}, .leader_commit = 0 }, 100_000_000);
     try std.testing.expect(resp.success);
     try std.testing.expectEqual(@as(usize, 2), log.len);

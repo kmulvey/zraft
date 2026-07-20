@@ -8,10 +8,12 @@
 const std = @import("std");
 const types = @import("types.zig");
 const rpc = @import("rpc.zig");
+const EntryType = types.EntryType;
 
 pub const LogEntry = struct {
     term: types.Term,
     index: types.LogIndex,
+    entry_type: EntryType,
     data: []const u8,
 
     pub fn deinit(self: *LogEntry, allocator: std.mem.Allocator) void {
@@ -41,7 +43,7 @@ pub fn Log(comptime ST: type) type {
             const entries = try allocator.alloc(LogEntry, cap);
 
             // Sentinel at index 0
-            entries[0] = LogEntry{ .term = 0, .index = 0, .data = &.{} };
+            entries[0] = LogEntry{ .term = 0, .index = 0, .entry_type = .command, .data = &.{} };
 
             var self = Self{
                 .allocator = allocator,
@@ -82,23 +84,33 @@ pub fn Log(comptime ST: type) type {
             return self.entries[@as(usize, @intCast(index))].term;
         }
 
-        /// Append a new entry. Writes to storage, then caches in memory.
+        /// Append a new command entry. Writes to storage, then caches in memory.
         pub fn append(self: *Self, term: types.Term, data: []const u8) !types.LogIndex {
+            return try self.appendEntry(term, .command, data);
+        }
+
+        /// Append a configuration entry. Writes to storage, then caches in memory.
+        pub fn appendConfig(self: *Self, term: types.Term, data: []const u8) !types.LogIndex {
+            return try self.appendEntry(term, .configuration, data);
+        }
+
+        /// Append a new entry with an explicit type. Writes to storage, then caches in memory.
+        pub fn appendEntry(self: *Self, term: types.Term, entry_type: EntryType, data: []const u8) !types.LogIndex {
             const index = self.lastIndex() + 1;
             const data_copy = try self.allocator.dupe(u8, data);
             errdefer self.allocator.free(data_copy);
 
             // Persist to storage first (crash-safe ordering)
-            // We use the storage's own allocator for the data copy it needs
             try self.storage.appendLogEntry(.{
                 .term = term,
                 .index = index,
+                .entry_type = entry_type,
                 .data = data_copy,
             });
 
             // Then cache in memory
             try self.grow();
-            self.entries[self.len] = LogEntry{ .term = term, .index = index, .data = data_copy };
+            self.entries[self.len] = LogEntry{ .term = term, .index = index, .entry_type = entry_type, .data = data_copy };
             self.len += 1;
             return index;
         }
@@ -138,7 +150,7 @@ pub fn Log(comptime ST: type) type {
                 if (e.data.len > 0) e.deinit(self.allocator);
             }
             // Rebuild with a single sentinel-compact entry
-            self.entries[0] = LogEntry{ .term = last_included_term, .index = last_included_index, .data = &.{} };
+            self.entries[0] = LogEntry{ .term = last_included_term, .index = last_included_index, .entry_type = .command, .data = &.{} };
             self.len = 1;
 
             // Persist snapshot marker to storage
@@ -171,6 +183,7 @@ pub fn Log(comptime ST: type) type {
                     self.entries[@as(usize, @intCast(i))] = LogEntry{
                         .term = entry.term,
                         .index = entry.index,
+                        .entry_type = entry.entry_type,
                         .data = entry.data,
                     };
                     self.len = @as(usize, @intCast(i)) + 1;
