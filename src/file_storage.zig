@@ -21,6 +21,7 @@ const ServerId = types.ServerId;
 const Term = types.Term;
 const LogIndex = types.LogIndex;
 const LogEntryOwned = storage.LogEntryOwned;
+const SnapshotData = storage.SnapshotData;
 
 const NULL_VOTED_FOR: u64 = 0xFFFF_FFFF_FFFF_FFFF;
 
@@ -116,6 +117,80 @@ pub const FileStorage = struct {
 
     pub fn sync(ptr: *Self) !void {
         try ptr.dir.sync();
+    }
+
+    // ------------------------------------------------------------------
+    // Snapshot (§7)
+    // ------------------------------------------------------------------
+
+    pub fn storeSnapshot(ptr: *Self, last_included_index: LogIndex, last_included_term: Term, data: []const u8) !void {
+        var buf: [256]u8 = undefined;
+        const path = try snapshotPath(&buf);
+        const tmp_path = try std.fmt.bufPrint(&buf, "snapshot.tmp", .{});
+
+        // Write to temp file then atomically rename
+        const tmp_file = try ptr.dir.createFile(tmp_path, .{ .truncate = true });
+        defer tmp_file.close();
+
+        var header: [24]u8 = undefined;
+        std.mem.writeIntLittle(u64, header[0..8], last_included_index);
+        std.mem.writeIntLittle(u64, header[8..16], last_included_term);
+        std.mem.writeIntLittle(u64, header[16..24], @as(u64, @intCast(data.len)));
+        try tmp_file.writeAll(&header);
+        if (data.len > 0) try tmp_file.writeAll(data);
+        try tmp_file.sync();
+
+        try ptr.dir.rename(tmp_path, path);
+    }
+
+    pub fn loadSnapshot(ptr: *Self, allocator: std.mem.Allocator) ?SnapshotData {
+        var buf: [256]u8 = undefined;
+        const path = snapshotPath(&buf) catch return null;
+        const file = ptr.dir.openFile(path, .{}) catch return null;
+        defer file.close();
+
+        var header: [24]u8 = undefined;
+        const n = file.readAll(&header) catch return null;
+        if (n < 24) return null;
+
+        const last_index = std.mem.readIntLittle(u64, header[0..8]);
+        const last_term = std.mem.readIntLittle(u64, header[8..16]);
+        const data_len: usize = @as(usize, @intCast(std.mem.readIntLittle(u64, header[16..24])));
+
+        const data = if (data_len > 0) allocator.alloc(u8, data_len) catch return null else &.{};
+        if (data_len > 0) {
+            file.readAll(data) catch {
+                if (data.len > 0) allocator.free(data);
+                return null;
+            };
+        }
+        return SnapshotData{ .last_included_index = last_index, .last_included_term = last_term, .data = data };
+    }
+
+    pub fn loadLastSnapshotIndex(ptr: *Self) LogIndex {
+        var buf: [256]u8 = undefined;
+        const path = snapshotPath(&buf) catch return 0;
+        const file = ptr.dir.openFile(path, .{}) catch return 0;
+        defer file.close();
+        var header: [8]u8 = undefined;
+        const n = file.readAll(&header) catch return 0;
+        if (n < 8) return 0;
+        return std.mem.readIntLittle(u64, header[0..8]);
+    }
+
+    pub fn loadLastSnapshotTerm(ptr: *Self) Term {
+        var buf: [256]u8 = undefined;
+        const path = snapshotPath(&buf) catch return 0;
+        const file = ptr.dir.openFile(path, .{}) catch return 0;
+        defer file.close();
+        var header: [16]u8 = undefined;
+        const n = file.readAll(&header) catch return 0;
+        if (n < 16) return 0;
+        return std.mem.readIntLittle(u64, header[8..16]);
+    }
+
+    fn snapshotPath(buf: []u8) ![]u8 {
+        return std.fmt.bufPrint(buf, "snapshot.bin", .{});
     }
 
     // ------------------------------------------------------------------
