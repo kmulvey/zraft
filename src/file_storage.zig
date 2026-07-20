@@ -256,53 +256,55 @@ pub const FileStorage = struct {
         var path_buf: [256]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buf, "wal.bin", .{});
 
-        var entries: std.ArrayListUnmanaged(LogEntryOwned) = .empty;
-        defer { for (entries.items) |*e| e.deinit(self.allocator); entries.deinit(self.allocator); }
+        // Open source and temp files simultaneously.
+        const src_file = self.dir.openFile(path, .{}) catch |err| switch (err) {
+            error.FileNotFound => return,
+            else => |e| return e,
+        };
+        defer src_file.close();
 
-        {
-            const file = self.dir.openFile(path, .{}) catch |err| switch (err) {
-                error.FileNotFound => return,
-                else => |e| return e,
-            };
-            defer file.close();
+        const tmp_path = try std.fmt.bufPrint(&path_buf, "wal.tmp", .{});
+        const tmp_file = try self.dir.createFile(tmp_path, .{ .truncate = true });
+        defer tmp_file.close();
 
-            const file_size = try file.getEndPos();
-            var pos: u64 = 0;
-            while (pos < file_size) {
-                var header: [21]u8 = undefined;
-                if ((try file.preadAll(&header, pos)) < 21) break;
-                const entry_index = mem.readInt(u64, header[0..8], .little);
-                const entry_term = mem.readInt(u64, header[8..16], .little);
-                const entry_type = @as(types.EntryType, @enumFromInt(header[16]));
-                const data_len: usize = @as(usize, @intCast(mem.readInt(u32, header[17..21], .little)));
+        // Stream entries: read from source, write matching ones to temp.
+        const file_size = try src_file.getEndPos();
+        var pos: u64 = 0;
+        var highest_kept_index: LogIndex = 0;
+        while (pos < file_size) {
+            var header: [21]u8 = undefined;
+            if ((try src_file.preadAll(&header, pos)) < 21) break;
+            const entry_index = mem.readInt(u64, header[0..8], .little);
+            const entry_term = mem.readInt(u64, header[8..16], .little);
+            const entry_type = @as(types.EntryType, @enumFromInt(header[16]));
+            const data_len: usize = @as(usize, @intCast(mem.readInt(u32, header[17..21], .little)));
 
-                if (entry_index <= last_kept_index) {
-                    const data = if (data_len > 0) try self.allocator.alloc(u8, data_len) else &.{};
-                    if (data_len > 0) _ = try file.preadAll(data, pos + 21);
-                    try entries.append(self.allocator, LogEntryOwned{ .term = entry_term, .index = entry_index, .entry_type = entry_type, .data = data });
-                }
-                pos += 21 + data_len;
-            }
-        }
+            if (entry_index <= last_kept_index) {
+                // Read entry data, write to temp, then free.
+                const data = if (data_len > 0) try self.allocator.alloc(u8, data_len) else &.{};
+                defer if (data.len > 0) self.allocator.free(data);
+                if (data_len > 0) _ = try src_file.preadAll(data, pos + 21);
 
-        {
-            const tmp_path = try std.fmt.bufPrint(&path_buf, "wal.tmp", .{});
-            const tmp_file = try self.dir.createFile(tmp_path, .{ .truncate = true });
-            defer tmp_file.close();
-
-            for (entries.items) |*entry| {
                 var hdr: [21]u8 = undefined;
-                mem.writeInt(u64, hdr[0..8], entry.index, .little);
-                mem.writeInt(u64, hdr[8..16], entry.term, .little);
-                hdr[16] = @intFromEnum(entry.entry_type);
-                mem.writeInt(u32, hdr[17..21], @as(u32, @intCast(entry.data.len)), .little);
+                mem.writeInt(u64, hdr[0..8], entry_index, .little);
+                mem.writeInt(u64, hdr[8..16], entry_term, .little);
+                hdr[16] = @intFromEnum(entry_type);
+                mem.writeInt(u32, hdr[17..21], @as(u32, @intCast(data_len)), .little);
                 try tmp_file.writeAll(&hdr);
-                if (entry.data.len > 0) try tmp_file.writeAll(entry.data);
+                if (data.len > 0) try tmp_file.writeAll(data);
+
+                highest_kept_index = entry_index;
             }
-            try tmp_file.sync();
+            pos += 21 + data_len;
         }
 
+        try tmp_file.sync();
+
+        // Atomically replace old WAL with compacted one.
         try self.dir.rename("wal.tmp", path);
+
+        // Update last_log_index to the highest kept entry.
+        self.last_log_index = highest_kept_index;
     }
 };
 
