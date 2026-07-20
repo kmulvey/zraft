@@ -4,7 +4,6 @@ const std = @import("std");
 const raft = @import("raft");
 
 const types = raft.types;
-const rpc = raft.rpc;
 const mem_storage = raft.memory_storage;
 const Log = raft.Log;
 

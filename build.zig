@@ -25,6 +25,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "test-read-index", .path = "src/test_read_index.zig" },
         .{ .name = "test-pipeline", .path = "src/test_pipeline.zig" },
         .{ .name = "test-validation", .path = "src/test_validation.zig" },
+        .{ .name = "test-fuzz", .path = "src/test_fuzz.zig" },
+        .{ .name = "test-sim", .path = "src/test_sim.zig" },
     };
 
     // Top-level "test" step that depends on all suites

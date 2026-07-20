@@ -12,7 +12,6 @@ const ServerId = types.ServerId;
 const Term = types.Term;
 const LogIndex = types.LogIndex;
 const Role = types.Role;
-const EntryType = types.EntryType;
 const ClusterConfig = types.ClusterConfig;
 const Config = config_mod.Config;
 const Storage = storage_iface.Storage;

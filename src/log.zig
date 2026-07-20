@@ -7,7 +7,6 @@
 
 const std = @import("std");
 const types = @import("types.zig");
-const rpc = @import("rpc.zig");
 const EntryType = types.EntryType;
 
 pub const LogEntry = struct {
