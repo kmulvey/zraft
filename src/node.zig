@@ -62,6 +62,8 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
         responses_since_read: usize = 0,
         /// How many peer responses are needed for quorum (quorum - 1, excluding self).
         responses_needed_for_read: usize = 0,
+        /// Cached serialized active config to avoid re-allocating on every heartbeat.
+        cached_config: []u8 = &.{},
         next_index: []LogIndex = &.{},
         match_index: []LogIndex = &.{},
         /// Per-peer snapshot send offset (0 = not started, snap_len = done).
@@ -128,6 +130,8 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
             self.voted_for = self.storage.loadVotedFor();
             self.snapshot_index = self.storage.loadLastSnapshotIndex();
             self.snapshot_term = self.storage.loadLastSnapshotTerm();
+            // Cache the serialized active config.
+            self.cached_config = try active_config.serialize(allocator);
             self.randomiseElectionTimeout();
             return self;
         }
@@ -138,6 +142,7 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
             self.allocator.free(self.snapshot_offset);
             self.allocator.free(self.peer_ids);
             if (self.snapshot_recv_buf.len > 0) self.allocator.free(self.snapshot_recv_buf);
+            if (self.cached_config.len > 0) self.allocator.free(self.cached_config);
             self.active_config.deinit(self.allocator);
             if (self.joint_config) |*jc| jc.deinit(self.allocator);
         }
@@ -304,10 +309,7 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
 
             if (req.term > self.current_term) {
                 if (self.role != .follower) try self.stepDown(req.term);
-                self.current_term = req.term;
-                try self.storage.storeTerm(self.current_term);
-                self.voted_for = null;
-                try self.storage.storeVotedFor(self.voted_for);
+                // stepDown writes term + voted_for; just update the timer.
                 self.election_start_ns = now_ns;
             } else if (req.term == self.current_term) {
                 // Same term: don't clear voted_for, but step down if candidate/pre-candidate
@@ -642,9 +644,8 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
             const send_ae = self.send_append_entries;
             const send_snap = self.send_install_snapshot;
 
-            // Serialize our current config to send to followers
-            const config_data = try self.active_config.serialize(self.allocator);
-            defer self.allocator.free(config_data);
+            // Use cached serialized config to avoid re-allocating on every heartbeat.
+            const config_data = self.cached_config;
 
             for (self.peer_ids, 0..) |peer, i| {
                 const next = if (i < self.next_index.len) self.next_index[i] else 1;
@@ -737,6 +738,12 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
                 self.active_config = parsed;
                 self.joint_config = null;
                 self.active_config_index = index;
+                // Re-cache the serialized config for heartbeat broadcasts.
+                if (self.cached_config.len > 0) self.allocator.free(self.cached_config);
+                self.cached_config = self.active_config.serialize(self.allocator) catch blk: {
+                    self.cached_config = &.{};
+                    break :blk &.{};
+                };
 
                 // Rebuild peer tracking for the new config
                 try self.rebuildPeerTracking();

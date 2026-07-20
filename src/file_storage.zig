@@ -306,6 +306,26 @@ pub const FileStorage = struct {
         // Update last_log_index to the highest kept entry.
         self.last_log_index = highest_kept_index;
     }
+
+    /// Wrap this FileStorage in a Storage(FileStorage) interface.
+    pub fn toStorage(ptr: *FileStorage) storage.Storage(FileStorage) {
+        return storage.Storage(FileStorage){
+            .ptr = ptr,
+            .loadTermFn = FileStorage.loadTerm,
+            .storeTermFn = FileStorage.storeTerm,
+            .loadVotedForFn = FileStorage.loadVotedFor,
+            .storeVotedForFn = FileStorage.storeVotedFor,
+            .loadLastLogIndexFn = FileStorage.loadLastLogIndex,
+            .loadLogEntryFn = FileStorage.loadLogEntry,
+            .appendLogEntryFn = FileStorage.appendLogEntry,
+            .truncateLogFn = FileStorage.truncateLog,
+            .syncFn = FileStorage.sync,
+            .storeSnapshotFn = FileStorage.storeSnapshot,
+            .loadSnapshotFn = FileStorage.loadSnapshot,
+            .loadLastSnapshotIndexFn = FileStorage.loadLastSnapshotIndex,
+            .loadLastSnapshotTermFn = FileStorage.loadLastSnapshotTerm,
+        };
+    }
 };
 
 test "FileStorage init creates directories and files" {

@@ -19,6 +19,16 @@ pub fn StateMachine(comptime T: type) type {
         snapshotFn: *const fn (ptr: *T, allocator: std.mem.Allocator) anyerror![]u8,
         restoreFn: *const fn (ptr: *T, data: []const u8) anyerror!void,
 
+        /// Convenience constructor: auto-fills function pointers from T's methods.
+        pub fn init(ptr: *T) Self {
+            return Self{
+                .ptr = ptr,
+                .applyFn = T.apply,
+                .snapshotFn = T.snapshot,
+                .restoreFn = T.restore,
+            };
+        }
+
         pub fn apply(self: Self, index: LogIndex, data: []const u8) void {
             self.applyFn(self.ptr, index, data);
         }
