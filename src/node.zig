@@ -362,7 +362,26 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
 
         pub fn clientAppend(self: *Self, data: []const u8) !LogIndex {
             if (self.role != .leader) return error.NotLeader;
-            return try self.log.append(self.current_term, data);
+            const idx = try self.log.append(self.current_term, data);
+            // Immediately start replicating the new entry (pipelining).
+            try self.broadcastAppendEntries(0);
+            return idx;
+        }
+
+        /// Append multiple data items as individual log entries and immediately
+        /// start replication. More efficient than calling `clientAppend` in a
+        /// loop because entries are appended without intermediate broadcasts.
+        pub fn clientAppendBatch(self: *Self, data_items: []const []const u8) ![]LogIndex {
+            if (self.role != .leader) return error.NotLeader;
+            const allocator = self.allocator;
+            const indices = try allocator.alloc(LogIndex, data_items.len);
+            errdefer allocator.free(indices);
+            for (data_items, 0..) |data, i| {
+                indices[i] = try self.log.append(self.current_term, data);
+            }
+            // One broadcast for all the new entries (pipelining).
+            try self.broadcastAppendEntries(0);
+            return indices;
         }
 
         // ---- Cluster membership change (§6) ----
@@ -631,6 +650,11 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
                 self.match_index[peer_idx] = resp.last_confirmed_index;
                 self.next_index[peer_idx] = self.match_index[peer_idx] + 1;
                 self.advanceCommitIndex();
+                // Pipelining: immediately send any remaining pending entries
+                // to this follower instead of waiting for the next heartbeat.
+                if (self.next_index[peer_idx] <= self.log.lastIndex()) {
+                    try self.broadcastAppendEntries(0);
+                }
             } else if (self.next_index[peer_idx] > 1) {
                 if (resp.conflict_term > 0) {
                     var new_next = self.next_index[peer_idx] - 1;

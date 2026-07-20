@@ -22,6 +22,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "test-membership", .path = "src/test_membership.zig" },
         .{ .name = "test-pre-vote", .path = "src/test_pre_vote.zig" },
         .{ .name = "test-read-index", .path = "src/test_read_index.zig" },
+        .{ .name = "test-pipeline", .path = "src/test_pipeline.zig" },
     };
 
     // Top-level "test" step that depends on all suites
