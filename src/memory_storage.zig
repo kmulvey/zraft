@@ -34,7 +34,7 @@ pub const MemoryStorage = struct {
         return ptr.current_term;
     }
 
-    pub fn storeTerm(ptr: *MemoryStorage, term: Term) void {
+    pub fn storeTerm(ptr: *MemoryStorage, term: Term) !void {
         ptr.current_term = term;
     }
 
@@ -42,7 +42,7 @@ pub const MemoryStorage = struct {
         return ptr.voted_for;
     }
 
-    pub fn storeVotedFor(ptr: *MemoryStorage, voted_for: ?ServerId) void {
+    pub fn storeVotedFor(ptr: *MemoryStorage, voted_for: ?ServerId) !void {
         ptr.voted_for = voted_for;
     }
 

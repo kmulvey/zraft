@@ -110,7 +110,7 @@ pub fn Log(comptime ST: type) type {
 
         /// Truncate all entries strictly after `last_kept`.
         /// Frees data for removed entries and compacts storage.
-        pub fn truncate(self: *Self, last_kept: types.LogIndex) void {
+        pub fn truncate(self: *Self, last_kept: types.LogIndex) !void {
             const keep = @as(usize, @intCast(last_kept)) + 1;
             if (keep >= self.len) return;
 
@@ -120,8 +120,8 @@ pub fn Log(comptime ST: type) type {
             }
             self.len = @max(keep, 1); // always keep sentinel
 
-            // Compact storage asynchronously (fire-and-forget for now)
-            self.storage.truncateLog(last_kept) catch {};
+            // Compact storage
+            try self.storage.truncateLog(last_kept);
         }
 
         /// Replace log contents entirely (for snapshot install).

@@ -29,10 +29,10 @@ pub fn Storage(comptime T: type) type {
         // --- Metadata ---
 
         loadTermFn: *const fn (ptr: *T) Term,
-        storeTermFn: *const fn (ptr: *T, term: Term) void,
+        storeTermFn: *const fn (ptr: *T, term: Term) anyerror!void,
 
         loadVotedForFn: *const fn (ptr: *T) ?ServerId,
-        storeVotedForFn: *const fn (ptr: *T, voted_for: ?ServerId) void,
+        storeVotedForFn: *const fn (ptr: *T, voted_for: ?ServerId) anyerror!void,
 
         loadLastLogIndexFn: *const fn (ptr: *T) LogIndex,
         loadLogEntryFn: *const fn (ptr: *T, index: LogIndex, allocator: std.mem.Allocator) ?LogEntryOwned,
@@ -47,16 +47,16 @@ pub fn Storage(comptime T: type) type {
             return self.loadTermFn(self.ptr);
         }
 
-        pub fn storeTerm(self: Self, term: Term) void {
-            self.storeTermFn(self.ptr, term);
+        pub fn storeTerm(self: Self, term: Term) !void {
+            try self.storeTermFn(self.ptr, term);
         }
 
         pub fn loadVotedFor(self: Self) ?ServerId {
             return self.loadVotedForFn(self.ptr);
         }
 
-        pub fn storeVotedFor(self: Self, voted_for: ?ServerId) void {
-            self.storeVotedForFn(self.ptr, voted_for);
+        pub fn storeVotedFor(self: Self, voted_for: ?ServerId) !void {
+            try self.storeVotedForFn(self.ptr, voted_for);
         }
 
         pub fn loadLastLogIndex(self: Self) LogIndex {

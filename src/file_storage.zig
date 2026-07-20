@@ -82,18 +82,18 @@ pub const FileStorage = struct {
         return ptr.current_term;
     }
 
-    pub fn storeTerm(ptr: *Self, term: Term) void {
+    pub fn storeTerm(ptr: *Self, term: Term) !void {
         ptr.current_term = term;
-        ptr.writeMetadata() catch {}; // best-effort for now; caller should sync
+        try ptr.writeMetadata();
     }
 
     pub fn loadVotedFor(ptr: *Self) ?ServerId {
         return ptr.voted_for;
     }
 
-    pub fn storeVotedFor(ptr: *Self, voted_for: ?ServerId) void {
+    pub fn storeVotedFor(ptr: *Self, voted_for: ?ServerId) !void {
         ptr.voted_for = voted_for;
-        ptr.writeMetadata() catch {};
+        try ptr.writeMetadata();
     }
 
     pub fn loadLastLogIndex(ptr: *Self) LogIndex {
@@ -115,7 +115,7 @@ pub const FileStorage = struct {
     }
 
     pub fn sync(ptr: *Self) !void {
-        ptr.dir.sync() catch {};
+        try ptr.dir.sync();
     }
 
     // ------------------------------------------------------------------
