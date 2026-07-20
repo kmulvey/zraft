@@ -53,6 +53,9 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
         last_applied: LogIndex = 0,
         role: Role = .follower,
 
+        // --- Vote tracking during election ---
+        votes_received: u32 = 0,
+
         // --- Leader volatile state ---
         next_index: []LogIndex = &.{},
         match_index: []LogIndex = &.{},
@@ -140,8 +143,15 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
             self.role = .candidate;
             self.voted_for = self.config.id;
             try self.storage.storeVotedFor(self.voted_for);
+            self.votes_received = 1; // vote for self
             self.election_start_ns = now_ns;
             self.randomiseElectionTimeout();
+
+            // Single-node cluster: become leader immediately
+            if (self.haveQuorum()) {
+                try self.becomeLeader();
+                return;
+            }
 
             const last_index = self.log.lastIndex();
             const last_term = self.log.termAt(last_index);
@@ -261,6 +271,7 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
             self.role = .follower;
             self.voted_for = null;
             try self.storage.storeVotedFor(self.voted_for);
+            self.votes_received = 0;
             self.election_start_ns = 0;
         }
 
@@ -343,7 +354,16 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
 
         pub fn handleRequestVoteResponse(self: *Self, _: ServerId, resp: rpc.RequestVoteResponse) !void {
             if (self.role != .candidate) return;
-            if (resp.term > self.current_term) try self.stepDown(resp.term);
+            if (resp.term > self.current_term) {
+                try self.stepDown(resp.term);
+                return;
+            }
+            if (resp.vote_granted) {
+                self.votes_received += 1;
+                if (self.haveQuorum()) {
+                    try self.becomeLeader();
+                }
+            }
         }
 
         pub fn becomeLeader(self: *Self) !void {
@@ -355,6 +375,12 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
                 self.match_index[i] = 0;
             }
             try self.broadcastAppendEntries(0);
+        }
+
+        fn haveQuorum(self: *const Self) bool {
+            // Majority of the cluster (self + peers)
+            const needed = (self.config.peers.len + 2) / 2;
+            return self.votes_received >= needed;
         }
 
         fn advanceCommitIndex(self: *Self) void {

@@ -28,7 +28,7 @@ test "single node election timeout" {
     defer node.deinit();
 
     try node.tick(200_000_000);
-    try std.testing.expectEqual(types.Role.candidate, node.role);
+    try std.testing.expectEqual(types.Role.leader, node.role);
     try std.testing.expectEqual(@as(u64, 1), node.current_term);
     try std.testing.expectEqual(@as(u64, 1), mstore.current_term);
 }
@@ -69,8 +69,9 @@ test "three node election basic" {
         if (i == 0) continue;
         const resp = try n.handleRequestVote(.{ .term = n1.current_term, .candidate_id = n1.config.id, .last_log_index = n1.log.lastIndex(), .last_log_term = n1.log.termAt(n1.log.lastIndex()) });
         try std.testing.expect(resp.vote_granted);
+        // Deliver the response back to the candidate (n1)
+        try n1.handleRequestVoteResponse(n.config.id, resp);
     }
-    try n1.becomeLeader();
     try std.testing.expectEqual(types.Role.leader, n1.role);
 }
 
