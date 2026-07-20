@@ -1,4 +1,4 @@
-//! Protocol RPC tests.
+//! RPC wire format tests.
 
 const std = @import("std");
 const raft = @import("raft");

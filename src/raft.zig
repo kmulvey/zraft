@@ -6,7 +6,7 @@
 //! Usage:
 //! ```zig
 //! const raft = @import("raft");
-//! var node = try raft.Node(YourStateMachine).init(allocator, config, log, sm);
+//! var node = try raft.Node(MyStateMachine, MyStorage).init(allocator, config, log, sm, storage, seed);
 //! ```
 
 pub const types = @import("types.zig");
@@ -15,12 +15,18 @@ pub const config = @import("config.zig");
 pub const log = @import("log.zig");
 pub const node = @import("node.zig");
 pub const state_machine = @import("state_machine.zig");
+pub const storage = @import("storage.zig");
+pub const memory_storage = @import("memory_storage.zig");
+pub const file_storage = @import("file_storage.zig");
 
 pub const Config = config.Config;
 pub const LogEntry = log.LogEntry;
 pub const Log = log.Log;
 pub const Node = node.Node;
 pub const StateMachine = state_machine.StateMachine;
+pub const Storage = storage.Storage;
+pub const MemoryStorage = memory_storage.MemoryStorage;
+pub const FileStorage = file_storage.FileStorage;
 pub const Role = types.Role;
 pub const ServerId = types.ServerId;
 pub const Term = types.Term;
