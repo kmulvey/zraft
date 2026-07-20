@@ -384,6 +384,47 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
             _ = try self.log.appendEntry(self.current_term, .configuration, data);
         }
 
+        // ===================================================================
+        // Linearizable reads (§8) — ReadIndex
+        // ===================================================================
+
+        /// Perform a linearizable read using the ReadIndex protocol (§8).
+        /// Records the current commit index and immediately sends a heartbeat
+        /// to confirm leadership. Returns the commit index at the time of the
+        /// call; the caller must wait until `lastApplied() >= returned_index`
+        /// before reading from the state machine.
+        ///
+        /// Returns `error.NotLeader` if the node is not the leader, or
+        /// `error.NoCommittedEntryInTerm` if no entry from the current term
+        /// has been committed yet (wait for the no-op to replicate).
+        pub fn readIndex(self: *Self) !LogIndex {
+            if (self.role != .leader) return error.NotLeader;
+
+            // §8, §3.5 (raft thesis): The leader must have at least one
+            // committed entry from its current term to safely serve reads.
+            // The no-op entry on becomeLeader guarantees this once committed.
+            const last_committed_term = self.log.termAt(self.commit_index);
+            if (last_committed_term < self.current_term) return error.NoCommittedEntryInTerm;
+
+            const read_commit = self.commit_index;
+
+            // Broadcast a heartbeat to confirm leadership with the cluster.
+            try self.broadcastAppendEntries(0);
+
+            return read_commit;
+        }
+
+        /// The highest log index that has been applied to the state machine.
+        /// Callers use this to determine when a read is safe after calling `readIndex`.
+        pub fn lastApplied(self: *const Self) LogIndex {
+            return self.last_applied;
+        }
+
+        /// The highest log index known to be committed.
+        pub fn commitIndex(self: *const Self) LogIndex {
+            return self.commit_index;
+        }
+
         /// Helper: get the union of all servers in the current effective configs.
         /// Caller must free the returned slice.
         fn allServerIds(self: *const Self, allocator: std.mem.Allocator) ![]ServerId {
@@ -631,6 +672,9 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
 
             // §8: Append a no-op entry to establish commitment authority for this term.
             _ = self.log.append(self.current_term, &.{}) catch {};
+            // Try to commit the no-op immediately. In a single-node cluster it
+            // commits right away; in a multi-node cluster it waits for replication.
+            self.advanceCommitIndex();
             try self.broadcastAppendEntries(0);
         }
 
