@@ -243,7 +243,7 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
             }
 
             self.applyCommittedEntries();
-            return .{ .term = self.current_term, .success = true };
+            return .{ .term = self.current_term, .success = true, .last_confirmed_index = self.log.lastIndex() };
         }
 
         pub fn handleInstallSnapshot(self: *Self, req: rpc.InstallSnapshotRequest) !rpc.InstallSnapshotResponse {
@@ -338,7 +338,7 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
             if (peer_idx >= self.next_index.len) return;
 
             if (resp.success) {
-                self.match_index[peer_idx] = self.log.lastIndex();
+                self.match_index[peer_idx] = resp.last_confirmed_index;
                 self.next_index[peer_idx] = self.match_index[peer_idx] + 1;
                 self.advanceCommitIndex();
             } else if (self.next_index[peer_idx] > 1) {

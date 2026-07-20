@@ -46,6 +46,9 @@ pub const LogEntryWire = struct {
 pub const AppendEntriesResponse = struct {
     term: Term,
     success: bool,
+    /// The follower's last log index after processing this request.
+    /// The leader uses this to update matchIndex correctly.
+    last_confirmed_index: LogIndex = 0,
     /// Optimisation: the conflicting index and term the follower suggests
     /// the leader skip past on rejection (raft paper §5.3, last paragraph).
     conflict_index: LogIndex = 0,
