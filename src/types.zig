@@ -16,12 +16,14 @@ pub const LogIndex = u64;
 /// Node role in the cluster.
 pub const Role = enum(u8) {
     follower,
+    pre_candidate,
     candidate,
     leader,
 
     pub fn label(self: Role) []const u8 {
         return switch (self) {
             .follower => "FOLLOWER",
+            .pre_candidate => "PRE-CANDIDATE",
             .candidate => "CANDIDATE",
             .leader => "LEADER",
         };
@@ -31,6 +33,7 @@ pub const Role = enum(u8) {
 test "Role label strings" {
     const stdtesting = std.testing;
     try stdtesting.expectEqualStrings("FOLLOWER", Role.follower.label());
+    try stdtesting.expectEqualStrings("PRE-CANDIDATE", Role.pre_candidate.label());
     try stdtesting.expectEqualStrings("CANDIDATE", Role.candidate.label());
     try stdtesting.expectEqualStrings("LEADER", Role.leader.label());
 }

@@ -45,7 +45,7 @@ test "node loads persisted state from storage on init" {
     try std.testing.expectEqual(@as(?u64, 3), node.voted_for);
 }
 
-test "node starts election and persists term" {
+test "node starts pre-vote on election timeout" {
     const allocator = std.testing.allocator;
     var mstore = mem_storage.MemoryStorage.init(allocator);
     defer mstore.deinit();
@@ -55,8 +55,25 @@ test "node starts election and persists term" {
     var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{2, 3}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 67890);
     defer node.deinit();
     try node.tick(200_000_000);
-    try std.testing.expectEqual(types.Role.candidate, node.role);
+    // Pre-vote: becomes pre_candidate without incrementing/persisting term
+    try std.testing.expectEqual(types.Role.pre_candidate, node.role);
+    try std.testing.expectEqual(@as(u64, 0), node.current_term);
+    try std.testing.expectEqual(@as(u64, 0), mstore.current_term);
+    try std.testing.expectEqual(@as(?u64, null), mstore.voted_for);
+}
+
+test "single node skips pre-vote and becomes leader via preVoteHaveQuorum" {
+    const allocator = std.testing.allocator;
+    var mstore = mem_storage.MemoryStorage.init(allocator);
+    defer mstore.deinit();
+    var log = try LogType.init(allocator, &mstore, 4);
+    defer log.deinit();
+    var sm_impl = TestSM{};
+    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{}, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
+    defer node.deinit();
+    try node.tick(200_000_000);
+    // Single node: pre-vote quorum (1 >= 1) immediately triggers real election,
+    // which also gets quorum (1 >= 1), so we become leader.
+    try std.testing.expectEqual(types.Role.leader, node.role);
     try std.testing.expectEqual(@as(u64, 1), node.current_term);
-    try std.testing.expectEqual(@as(u64, 1), mstore.current_term);
-    try std.testing.expectEqual(@as(?u64, 1), mstore.voted_for);
 }

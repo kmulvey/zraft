@@ -49,6 +49,7 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
         active_config_index: LogIndex = 0,
 
         votes_received: u32 = 0,
+        pre_votes_received: u32 = 0,
         next_index: []LogIndex = &.{},
         match_index: []LogIndex = &.{},
         /// Parallel to next_index/match_index: server IDs in current peer set.
@@ -62,6 +63,7 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
 
         send_append_entries: ?*const fn (peer: ServerId, req: rpc.AppendEntriesRequest) void = null,
         send_request_vote: ?*const fn (peer: ServerId, req: rpc.RequestVoteRequest) void = null,
+        send_pre_vote: ?*const fn (peer: ServerId, req: rpc.PreVoteRequest) void = null,
         send_install_snapshot: ?*const fn (peer: ServerId, req: rpc.InstallSnapshotRequest) void = null,
 
         // ===================================================================
@@ -114,6 +116,7 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
         pub fn tick(self: *Self, now_ns: u64) !void {
             switch (self.role) {
                 .follower => try self.tickFollower(now_ns),
+                .pre_candidate => try self.tickPreCandidate(now_ns),
                 .candidate => try self.tickCandidate(now_ns),
                 .leader => try self.tickLeader(now_ns),
             }
@@ -121,12 +124,17 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
 
         fn tickFollower(self: *Self, now_ns: u64) !void {
             if (now_ns < self.election_start_ns + self.election_timeout_ns) return;
-            try self.startElection(now_ns);
+            try self.startPreVote(now_ns);
+        }
+
+        fn tickPreCandidate(self: *Self, now_ns: u64) !void {
+            if (now_ns < self.election_start_ns + self.election_timeout_ns) return;
+            try self.startPreVote(now_ns);
         }
 
         fn tickCandidate(self: *Self, now_ns: u64) !void {
             if (now_ns < self.election_start_ns + self.election_timeout_ns) return;
-            try self.startElection(now_ns);
+            try self.startRealElection(now_ns);
         }
 
         fn tickLeader(self: *Self, now_ns: u64) !void {
@@ -136,10 +144,39 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
         }
 
         // ===================================================================
-        // Election (§5.2)
+        // Election (§5.2) with Pre-Vote (§9.6)
         // ===================================================================
 
-        fn startElection(self: *Self, now_ns: u64) !void {
+        /// Start a pre-vote (§9.6). The node transitions to pre_candidate and
+        /// asks peers whether they would grant a vote, WITHOUT incrementing or
+        /// persisting its term. Only if a quorum agrees does it call startRealElection.
+        fn startPreVote(self: *Self, now_ns: u64) !void {
+            self.role = .pre_candidate;
+            self.pre_votes_received = 1; // vote for self
+            self.election_start_ns = now_ns;
+            self.randomiseElectionTimeout();
+
+            if (self.preVoteHaveQuorum()) {
+                try self.startRealElection(now_ns);
+                return;
+            }
+
+            const proposed_term = self.current_term + 1;
+            const last_index = self.log.lastIndex();
+            const last_term = self.log.termAt(last_index);
+            if (self.send_pre_vote) |send| {
+                for (self.active_config.servers) |srv| {
+                    if (srv == self.config.id) continue;
+                    send(srv, .{
+                        .term = proposed_term, .candidate_id = self.config.id,
+                        .last_log_index = last_index, .last_log_term = last_term,
+                    });
+                }
+            }
+        }
+
+        /// Real election — term is incremented and persisted (§5.2).
+        fn startRealElection(self: *Self, now_ns: u64) !void {
             self.current_term += 1;
             try self.storage.storeTerm(self.current_term);
             self.role = .candidate;
@@ -166,6 +203,14 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
             }
         }
 
+        /// Start an election directly (no pre-vote). Used only when we receive
+        /// an AppendEntries from a stale leader or see a higher term — in those
+        /// cases the cluster is already disrupted so pre-vote is unnecessary.
+        /// Also called from tickCandidate when election timeout fires.
+        fn startElection(self: *Self, now_ns: u64) !void {
+            try self.startRealElection(now_ns);
+        }
+
         // ===================================================================
         // RPC Handlers
         // ===================================================================
@@ -189,6 +234,30 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
                 if (req.last_log_term == my_last_term and req.last_log_index < my_last_idx) break :blk false;
                 self.voted_for = req.candidate_id;
                 try self.storage.storeVotedFor(self.voted_for);
+                break :blk true;
+            };
+            return .{ .term = self.current_term, .vote_granted = granted };
+        }
+
+        /// Handle a PreVoteRequest (§9.6).
+        /// Same log-up-to-date logic as handleRequestVote, but does NOT persist
+        /// votedFor, step down, or modify any durable state.
+        pub fn handlePreVote(self: *const Self, req: rpc.PreVoteRequest) rpc.PreVoteResponse {
+            // If the proposed term is stale, deny.
+            if (req.term <= self.current_term) return .{ .term = self.current_term, .vote_granted = false };
+
+            // §6: Only grant pre-votes to candidates in our active config.
+            if (!self.active_config.contains(req.candidate_id)) {
+                return .{ .term = self.current_term, .vote_granted = false };
+            }
+
+            const granted = blk: {
+                if (req.last_log_term < self.snapshot_term) break :blk false;
+                if (req.last_log_term == self.snapshot_term and req.last_log_index < self.snapshot_index) break :blk false;
+                const my_last_idx = self.log.lastIndex();
+                const my_last_term = self.log.termAt(my_last_idx);
+                if (req.last_log_term < my_last_term) break :blk false;
+                if (req.last_log_term == my_last_term and req.last_log_index < my_last_idx) break :blk false;
                 break :blk true;
             };
             return .{ .term = self.current_term, .vote_granted = granted };
@@ -541,6 +610,19 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
             }
         }
 
+        /// Handle a PreVoteResponse (§9.6).
+        /// Only a pre_candidate processes these. If we get enough grants,
+        /// start the real election.
+        pub fn handlePreVoteResponse(self: *Self, _: ServerId, resp: rpc.PreVoteResponse) !void {
+            if (self.role != .pre_candidate) return;
+            // If the peer reports a higher term than ours, step down.
+            if (resp.term > self.current_term) { try self.stepDown(resp.term); return; }
+            if (resp.vote_granted) {
+                self.pre_votes_received += 1;
+                if (self.preVoteHaveQuorum()) try self.startRealElection(self.election_start_ns);
+            }
+        }
+
         pub fn becomeLeader(self: *Self) !void {
             self.role = .leader;
             self.voted_for = null;
@@ -554,6 +636,10 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
 
         fn haveQuorum(self: *const Self) bool {
             return self.votes_received >= self.active_config.quorum();
+        }
+
+        fn preVoteHaveQuorum(self: *const Self) bool {
+            return self.pre_votes_received >= self.active_config.quorum();
         }
 
         fn advanceCommitIndex(self: *Self) void {

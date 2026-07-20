@@ -51,12 +51,20 @@ test "three node election basic" {
     defer n3.deinit();
 
     try n1.tick(200_000_000);
-    try std.testing.expectEqual(types.Role.candidate, n1.role);
+    try std.testing.expectEqual(types.Role.pre_candidate, n1.role);
     try std.testing.expectEqual(types.Role.follower, n2.role);
     try std.testing.expectEqual(types.Role.follower, n3.role);
 
-    for ([3]*NodeType{ &n1, &n2, &n3 }, 0..) |n, i| {
-        if (i == 0) continue;
+    // Pre-vote round (§9.6): followers grant pre-vote, n1 transitions to candidate
+    for ([2]*NodeType{ &n2, &n3 }) |n| {
+        const resp = n.handlePreVote(.{ .term = n1.current_term + 1, .candidate_id = n1.config.id, .last_log_index = n1.log.lastIndex(), .last_log_term = n1.log.termAt(n1.log.lastIndex()) });
+        try std.testing.expect(resp.vote_granted);
+        try n1.handlePreVoteResponse(n.config.id, resp);
+    }
+    try std.testing.expectEqual(types.Role.candidate, n1.role);
+
+    // Real election: RequestVote round
+    for ([2]*NodeType{ &n2, &n3 }) |n| {
         const resp = try n.handleRequestVote(.{ .term = n1.current_term, .candidate_id = n1.config.id, .last_log_index = n1.log.lastIndex(), .last_log_term = n1.log.termAt(n1.log.lastIndex()) });
         try std.testing.expect(resp.vote_granted);
         try n1.handleRequestVoteResponse(n.config.id, resp);

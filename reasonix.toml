@@ -1,0 +1,9 @@
+[sandbox]
+# Enforce that the workspace root is the hard boundary
+restrict_to_workspace = true
+
+[tools]
+scope = "workspace" # Prevents tools from running cd .. or looking at parent paths
+
+[permissions]
+allow = ["Bash(cd /home/kmulvey/src/zig/raft && /home/kmulvey/bin/zig-0.16.0/zig build test 2>&1)", "Bash(cd /home/kmulvey/src/zig/raft && /home/kmulvey/bin/zig-0.16.0/zig build test 2>&1 | head -30)", "Bash(cd /home/kmulvey/src/zig/raft && /home/kmulvey/bin/zig-0.16.0/zig build test 2>&1; echo \"EXIT: $?\")", "Bash(cd /home/kmulvey/src/zig/raft && /home/kmulvey/bin/zig-0.16.0/zig build test 2>&1 | head -80)", "Bash(cd /home/kmulvey/src/zig/raft && /home/kmulvey/bin/zig-0.16.0/zig build test 2>&1 | head -50)", "Bash(cd /home/kmulvey/src/zig/raft && /home/kmulvey/bin/zig-0.16.0/zig build -- --listen=- 2>&1 | head -5; /home/kmulvey/bin/zig-0.16.0/zig build test -- --listen=- 2>&1 | grep -E \"^(test|passed|failed)\" | head -20)", "Bash(cd /home/kmulvey/src/zig/raft && /home/kmulvey/bin/zig-0.16.0/zig build test 2>&1 | wc -l; echo \"---\"; for f in .zig-cache/o/*/test-*; do \"$f\" --cache-dir .zig-cache --seed=0 2>&1 | head -5; echo \"---\"; done 2>/dev/null || true)", "Bash(cd /home/kmulvey/src/zig/raft && /home/kmulvey/bin/zig-0.16.0/zig build test 2>&1 | wc -l; echo \"---\"; git status --short)", "Bash(cd /home/kmulvey/src/zig/raft && git add -A && git diff --cached --stat)"]

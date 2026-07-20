@@ -23,6 +23,25 @@ pub const RequestVoteResponse = struct {
 };
 
 // ---------------------------------------------------------------------------
+// PreVote (§9.6) — identical wire format to RequestVote, but responders
+// do NOT persist votedFor or step down.
+// ---------------------------------------------------------------------------
+
+pub const PreVoteRequest = struct {
+    /// Proposed next term (current_term + 1 of the candidate).
+    term: Term,
+    candidate_id: ServerId,
+    last_log_index: LogIndex,
+    last_log_term: Term,
+};
+
+pub const PreVoteResponse = struct {
+    /// The responder's current term (so the candidate can detect staleness).
+    term: Term,
+    vote_granted: bool,
+};
+
+// ---------------------------------------------------------------------------
 // AppendEntries (also used for heartbeats when entries is empty)
 // ---------------------------------------------------------------------------
 

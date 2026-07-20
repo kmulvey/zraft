@@ -39,6 +39,8 @@ pub const AppendEntriesRequest = rpc.AppendEntriesRequest;
 pub const AppendEntriesResponse = rpc.AppendEntriesResponse;
 pub const InstallSnapshotRequest = rpc.InstallSnapshotRequest;
 pub const InstallSnapshotResponse = rpc.InstallSnapshotResponse;
+pub const PreVoteRequest = rpc.PreVoteRequest;
+pub const PreVoteResponse = rpc.PreVoteResponse;
 
 test {
     std.testing.refAllDecls(@This());
