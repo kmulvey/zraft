@@ -304,7 +304,7 @@ fn runSim(allocator: std.mem.Allocator, n_nodes: u64, seed: u64, max_steps: u64,
             };
 
             if (deliver) {
-                const to_idx = @as(usize, @intCast(m.to - 1));
+                const to_idx: usize = @intCast(m.to - 1);
                 if (to_idx < nodes.len) {
                     deliverMessage(&nodes[to_idx], m) catch {};
                 }
@@ -664,7 +664,7 @@ fn runLinCheck(allocator: std.mem.Allocator, seed: u64, max_steps: u64) !void {
         while (mi < ctx.messages.items.len) {
             const m = ctx.messages.items[mi];
             if (m.deliver_at > now) { mi += 1; continue; }
-            const to_idx = @as(usize, @intCast(m.to - 1));
+            const to_idx: usize = @intCast(m.to - 1);
             if (to_idx < nodes.len) {
                 deliverMessage(&nodes[to_idx], m) catch {};
             }

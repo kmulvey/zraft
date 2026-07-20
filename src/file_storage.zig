@@ -121,7 +121,7 @@ pub const FileStorage = struct {
 
         const last_index = mem.readInt(u64, header[0..8], .little);
         const last_term = mem.readInt(u64, header[8..16], .little);
-        const data_len: usize = @as(usize, @intCast(mem.readInt(u64, header[16..24], .little)));
+        const data_len: usize = @intCast(mem.readInt(u64, header[16..24], .little));
 
         const data = if (data_len > 0) allocator.alloc(u8, data_len) catch return null else &.{};
         if (data_len > 0) {
@@ -214,8 +214,8 @@ pub const FileStorage = struct {
             if ((try file.preadAll(&header, pos)) < 21) return null;
             const entry_index = mem.readInt(u64, header[0..8], .little);
             const entry_term = mem.readInt(u64, header[8..16], .little);
-            const entry_type = @as(types.EntryType, @enumFromInt(header[16]));
-            const data_len: usize = @as(usize, @intCast(mem.readInt(u32, header[17..21], .little)));
+            const entry_type: types.EntryType = @enumFromInt(header[16]);
+            const data_len: usize = @intCast(mem.readInt(u32, header[17..21], .little));
 
             if (entry_index == index) {
                 const data = if (data_len > 0) try allocator.alloc(u8, data_len) else &.{};
@@ -242,7 +242,7 @@ pub const FileStorage = struct {
             var header: [21]u8 = undefined;
             if ((try file.preadAll(&header, pos)) < 21) break;
             const entry_index = mem.readInt(u64, header[0..8], .little);
-            const data_len: usize = @as(usize, @intCast(mem.readInt(u32, header[17..21], .little)));
+            const data_len: usize = @intCast(mem.readInt(u32, header[17..21], .little));
             self.last_log_index = @max(self.last_log_index, entry_index);
             pos += 21 + data_len;
         }
@@ -276,8 +276,8 @@ pub const FileStorage = struct {
             if ((try src_file.preadAll(&header, pos)) < 21) break;
             const entry_index = mem.readInt(u64, header[0..8], .little);
             const entry_term = mem.readInt(u64, header[8..16], .little);
-            const entry_type = @as(types.EntryType, @enumFromInt(header[16]));
-            const data_len: usize = @as(usize, @intCast(mem.readInt(u32, header[17..21], .little)));
+            const entry_type: types.EntryType = @enumFromInt(header[16]);
+            const data_len: usize = @intCast(mem.readInt(u32, header[17..21], .little));
 
             if (entry_index <= last_kept_index) {
                 // Read entry data, write to temp, then free.
