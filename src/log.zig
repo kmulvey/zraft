@@ -64,14 +64,21 @@ pub fn Log(comptime ST: type) type {
             self.* = undefined;
         }
 
-        /// Last entry index (0 if empty beyond sentinel).
+        /// Last entry index (0 if empty).
+        /// After snapshot compaction, returns the sentinel's stored index.
         pub fn lastIndex(self: *const Self) types.LogIndex {
+            if (self.len <= 1) return self.entries[0].index;
             return @as(types.LogIndex, @intCast(self.len - 1));
         }
 
         /// Term at a given index. Returns 0 for index 0 or out-of-range.
         pub fn termAt(self: *const Self, index: types.LogIndex) types.Term {
-            if (index >= self.len) return 0;
+            if (index >= self.len) {
+                // After compaction, only the sentinel entry exists.
+                // Any index <= sentinel.index returns the sentinel's term.
+                if (self.len == 1 and index <= self.entries[0].index) return self.entries[0].term;
+                return 0;
+            }
             return self.entries[@as(usize, @intCast(index))].term;
         }
 

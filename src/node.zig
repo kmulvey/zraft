@@ -204,21 +204,11 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
             if (req.term < self.current_term) return .{ .term = self.current_term, .success = false };
             if (req.term > self.current_term) try self.stepDown(req.term);
 
-            // §7: Install snapshot — the caller has received the snapshot data
-            // and should pass it to the state machine restore.
-            // For a single-chunk snapshot (done=true on first message):
+            // §7: Install snapshot
             if (req.done) {
-                // Store the snapshot in persistent storage
                 try self.storage.storeSnapshot(req.last_included_index, req.last_included_term, req.data);
-
-                // Restore the state machine from snapshot data
-                var fbs = std.io.fixedBufferStream(req.data);
-                try self.state_machine.restore(fbs.reader().any());
-
-                // Compact the log
+                try self.state_machine.restore(req.data);
                 try self.log.replaceWithSnapshot(req.last_included_index, req.last_included_term);
-
-                // Update tracking
                 self.snapshot_index = req.last_included_index;
                 self.snapshot_term = req.last_included_term;
                 self.last_applied = req.last_included_index;
@@ -233,24 +223,17 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
         // ===================================================================
 
         /// Take a snapshot at the current applied state.
-        /// Call this periodically (e.g., every N committed entries).
-        /// The state machine must serialize its state into the provided buffer.
+        /// The state machine serializes its state into allocated bytes.
         pub fn takeSnapshot(self: *Self) !void {
-            if (self.last_applied <= self.snapshot_index) return; // nothing new to snapshot
+            if (self.last_applied <= self.snapshot_index) return;
 
-            // Serialize state machine into a buffer
-            var buf = std.ArrayList(u8).init(self.allocator);
-            defer buf.deinit();
-            try self.state_machine.snapshot(buf.writer().any());
-
-            // Persist snapshot
             const snap_index = self.last_applied;
             const snap_term = self.log.termAt(snap_index);
-            try self.storage.storeSnapshot(snap_index, snap_term, buf.items);
+            const data = try self.state_machine.snapshot(self.allocator);
+            defer self.allocator.free(data);
 
-            // Compact the log
+            try self.storage.storeSnapshot(snap_index, snap_term, data);
             try self.log.replaceWithSnapshot(snap_index, snap_term);
-
             self.snapshot_index = snap_index;
             self.snapshot_term = snap_term;
         }

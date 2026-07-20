@@ -10,8 +10,8 @@ const Log = raft.Log;
 
 const TestSM = struct {
     pub fn apply(_: *@This(), _: u64, _: []const u8) void {}
-    pub fn snapshot(_: *@This(), _: anytype) !void {}
-    pub fn restore(_: *@This(), _: anytype) !void {}
+    pub fn snapshot(_: *@This(), _: std.mem.Allocator) ![]u8 { return &.{}; }
+    pub fn restore(_: *@This(), _: []const u8) !void {}
 };
 
 const NodeType = raft.Node(TestSM, mem_storage.MemoryStorage);
