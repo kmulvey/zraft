@@ -168,7 +168,10 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
             const last_index = self.log.lastIndex();
             const last_term = self.log.termAt(last_index);
             if (self.send_pre_vote) |send| {
-                for (self.active_config.servers) |srv| {
+                // During joint consensus, send to all servers in the union of configs.
+                const all_servers = try self.allServerIds(self.allocator);
+                defer self.allocator.free(all_servers);
+                for (all_servers) |srv| {
                     if (srv == self.config.id) continue;
                     send(srv, .{
                         .term = proposed_term, .candidate_id = self.config.id,
@@ -269,12 +272,19 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
         pub fn handleAppendEntries(self: *Self, req: rpc.AppendEntriesRequest, now_ns: u64) !rpc.AppendEntriesResponse {
             if (req.term < self.current_term) return .{ .term = self.current_term, .success = false };
 
-            if (req.term >= self.current_term) {
+            if (req.term > self.current_term) {
                 if (self.role != .follower) try self.stepDown(req.term);
                 self.current_term = req.term;
                 try self.storage.storeTerm(self.current_term);
                 self.voted_for = null;
                 try self.storage.storeVotedFor(self.voted_for);
+                self.election_start_ns = now_ns;
+            } else if (req.term == self.current_term) {
+                // Same term: don't clear voted_for, but step down if candidate/pre-candidate
+                if (self.role == .candidate or self.role == .pre_candidate) {
+                    self.role = .follower;
+                    self.votes_received = 0;
+                }
                 self.election_start_ns = now_ns;
             }
 
@@ -319,7 +329,7 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
                 const last_new = if (req.entries.len > 0) req.entries[req.entries.len - 1].index else req.prev_log_index;
                 self.commit_index = @min(req.leader_commit, last_new);
             }
-            self.applyCommittedEntries();
+            try self.applyCommittedEntries();
             return .{ .term = self.current_term, .success = true, .last_confirmed_index = self.log.lastIndex() };
         }
 
@@ -399,11 +409,17 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
 
             // Serialize the new config
             const new_config = ClusterConfig{ .servers = new_servers };
-            const data = try new_config.serialize(self.allocator);
-            defer self.allocator.free(data);
+            const config_bytes = try new_config.serialize(self.allocator);
+            defer self.allocator.free(config_bytes);
+
+            // Prepend phase byte (0 = joint, 1 = final) — needed by handleConfigEntry.
+            var buf = std.ArrayListUnmanaged(u8).empty;
+            defer buf.deinit(self.allocator);
+            try buf.append(self.allocator, 0); // phase byte: joint entry
+            try buf.appendSlice(self.allocator, config_bytes);
 
             // Append the C_old,new (joint) config entry
-            _ = try self.log.appendEntry(self.current_term, .configuration, data);
+            _ = try self.log.appendEntry(self.current_term, .configuration, buf.items);
         }
 
         // ===================================================================
@@ -590,7 +606,7 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
             }
         }
 
-        fn applyCommittedEntries(self: *Self) void {
+        fn applyCommittedEntries(self: *Self) !void {
             while (self.last_applied < self.commit_index) {
                 self.last_applied += 1;
                 if (self.last_applied >= self.log.len) break;
@@ -598,7 +614,7 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
 
                 if (entry.entry_type == .configuration) {
                     // §6: Handle configuration entry
-                    self.handleConfigEntry(entry.index, entry.data);
+                    try self.handleConfigEntry(entry.index, entry.data);
                 } else {
                     self.state_machine.apply(self.last_applied, entry.data);
                 }
@@ -606,7 +622,7 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
         }
 
         /// Process a committed configuration entry (§6).
-        fn handleConfigEntry(self: *Self, index: LogIndex, data: []const u8) void {
+        fn handleConfigEntry(self: *Self, index: LogIndex, data: []const u8) !void {
             if (data.len < 1) return;
 
             _ = data[0]; // phase byte: 0 = joint, 1 = final (not currently used)
@@ -614,8 +630,7 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
 
             if (self.joint_config != null) {
                 // We are in joint consensus — this config entry is the final C_new.
-                // Replace active config with C_new, drop joint config.
-                const parsed = ClusterConfig.deserialize(config_data, self.allocator) catch return;
+                const parsed = try ClusterConfig.deserialize(config_data, self.allocator);
                 self.active_config.deinit(self.allocator);
                 if (self.joint_config) |*jc| jc.deinit(self.allocator);
                 self.active_config = parsed;
@@ -623,19 +638,15 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
                 self.active_config_index = index;
 
                 // Rebuild peer tracking for the new config
-                self.rebuildPeerTracking() catch {};
+                try self.rebuildPeerTracking();
             } else {
                 // Not in joint — this is a C_old,new (joint) entry.
-                const parsed = ClusterConfig.deserialize(config_data, self.allocator) catch return;
+                const parsed = try ClusterConfig.deserialize(config_data, self.allocator);
 
-                // During joint, active_config stays as C_old.
-                // joint_config becomes C_new (the new desired config).
-                // active_config_index stays at the C_old entry index.
                 self.joint_config = parsed;
-                // Note: we DON'T change active_config or active_config_index yet.
 
                 // Rebuild peer tracking to include servers from both configs
-                self.rebuildPeerTracking() catch {};
+                try self.rebuildPeerTracking();
             }
         }
 
@@ -652,7 +663,7 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
             if (resp.success) {
                 self.match_index[peer_idx] = resp.last_confirmed_index;
                 self.next_index[peer_idx] = self.match_index[peer_idx] + 1;
-                self.advanceCommitIndex();
+                try self.advanceCommitIndex();
                 // Pipelining: immediately send any remaining pending entries
                 // to this follower instead of waiting for the next heartbeat.
                 if (self.next_index[peer_idx] <= self.log.lastIndex()) {
@@ -701,7 +712,7 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
             _ = self.log.append(self.current_term, &.{}) catch {};
             // Try to commit the no-op immediately. In a single-node cluster it
             // commits right away; in a multi-node cluster it waits for replication.
-            self.advanceCommitIndex();
+            try self.advanceCommitIndex();
             try self.broadcastAppendEntries(0);
         }
 
@@ -713,20 +724,35 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
             return self.pre_votes_received >= self.active_config.quorum();
         }
 
-        fn advanceCommitIndex(self: *Self) void {
-            const quorum = if (self.joint_config) |jc|
-                @max(self.active_config.quorum(), jc.quorum())
-            else
-                self.active_config.quorum();
-
+        fn advanceCommitIndex(self: *Self) !void {
             var n = self.log.lastIndex();
             while (n > self.commit_index) {
                 if (self.log.termAt(n) != self.current_term) { if (n == 0) break; n -= 1; continue; }
-                var count: usize = 1;
-                for (self.match_index) |mi| { if (mi >= n) count += 1; }
-                if (count >= quorum) {
+
+                // Count replication per config.
+                // Self is always in active_config; during joint it must also be in joint_config.
+                var active_count: usize = 1;
+                var joint_count: usize = if (self.joint_config != null) 1 else 0;
+
+                for (self.match_index, 0..) |mi, i| {
+                    if (mi >= n) {
+                        const pid = self.peer_ids[i];
+                        if (self.active_config.contains(pid)) active_count += 1;
+                        if (self.joint_config) |jc| {
+                            if (jc.contains(pid)) joint_count += 1;
+                        }
+                    }
+                }
+
+                const active_quorum = self.active_config.quorum();
+                const satisfied = if (self.joint_config) |jc|
+                    active_count >= active_quorum and joint_count >= jc.quorum()
+                else
+                    active_count >= active_quorum;
+
+                if (satisfied) {
                     self.commit_index = n;
-                    self.applyCommittedEntries();
+                    try self.applyCommittedEntries();
 
                     // Check if we just committed a config entry as leader.
                     // If it was a C_old,new entry (joint), append the final C_new.

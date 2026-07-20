@@ -191,10 +191,11 @@ pub const FileStorage = struct {
         const file = try self.dir.createFile(path, .{ .truncate = false });
         defer file.close();
         try file.seekFromEnd(0);
-        var header: [20]u8 = undefined;
+        var header: [21]u8 = undefined;
         mem.writeInt(u64, header[0..8], entry.index, .little);
         mem.writeInt(u64, header[8..16], entry.term, .little);
-        mem.writeInt(u32, header[16..20], @as(u32, @intCast(entry.data.len)), .little);
+        header[16] = @intFromEnum(entry.entry_type);
+        mem.writeInt(u32, header[17..21], @as(u32, @intCast(entry.data.len)), .little);
         try file.writeAll(&header);
         if (entry.data.len > 0) try file.writeAll(entry.data);
         try file.sync();
@@ -209,18 +210,19 @@ pub const FileStorage = struct {
         const file_size = try file.getEndPos();
         var pos: u64 = 0;
         while (pos < file_size) {
-            var header: [20]u8 = undefined;
-            if ((try file.preadAll(&header, pos)) < 20) return null;
+            var header: [21]u8 = undefined;
+            if ((try file.preadAll(&header, pos)) < 21) return null;
             const entry_index = mem.readInt(u64, header[0..8], .little);
             const entry_term = mem.readInt(u64, header[8..16], .little);
-            const data_len: usize = @as(usize, @intCast(mem.readInt(u32, header[16..20], .little)));
+            const entry_type = @as(types.EntryType, @enumFromInt(header[16]));
+            const data_len: usize = @as(usize, @intCast(mem.readInt(u32, header[17..21], .little)));
 
             if (entry_index == index) {
                 const data = if (data_len > 0) try allocator.alloc(u8, data_len) else &.{};
-                if (data_len > 0) _ = try file.preadAll(data, pos + 20);
-                return LogEntryOwned{ .term = entry_term, .index = entry_index, .entry_type = .command, .data = data };
+                if (data_len > 0) _ = try file.preadAll(data, pos + 21);
+                return LogEntryOwned{ .term = entry_term, .index = entry_index, .entry_type = entry_type, .data = data };
             }
-            pos += 20 + data_len;
+            pos += 21 + data_len;
         }
         return null;
     }
@@ -237,12 +239,12 @@ pub const FileStorage = struct {
         const file_size = try file.getEndPos();
         var pos: u64 = 0;
         while (pos < file_size) {
-            var header: [20]u8 = undefined;
-            if ((try file.preadAll(&header, pos)) < 20) break;
+            var header: [21]u8 = undefined;
+            if ((try file.preadAll(&header, pos)) < 21) break;
             const entry_index = mem.readInt(u64, header[0..8], .little);
-            const data_len: usize = @as(usize, @intCast(mem.readInt(u32, header[16..20], .little)));
+            const data_len: usize = @as(usize, @intCast(mem.readInt(u32, header[17..21], .little)));
             self.last_log_index = @max(self.last_log_index, entry_index);
-            pos += 20 + data_len;
+            pos += 21 + data_len;
         }
     }
 
@@ -267,18 +269,19 @@ pub const FileStorage = struct {
             const file_size = try file.getEndPos();
             var pos: u64 = 0;
             while (pos < file_size) {
-                var header: [20]u8 = undefined;
-                if ((try file.preadAll(&header, pos)) < 20) break;
+                var header: [21]u8 = undefined;
+                if ((try file.preadAll(&header, pos)) < 21) break;
                 const entry_index = mem.readInt(u64, header[0..8], .little);
                 const entry_term = mem.readInt(u64, header[8..16], .little);
-                const data_len: usize = @as(usize, @intCast(mem.readInt(u32, header[16..20], .little)));
+                const entry_type = @as(types.EntryType, @enumFromInt(header[16]));
+                const data_len: usize = @as(usize, @intCast(mem.readInt(u32, header[17..21], .little)));
 
                 if (entry_index <= last_kept_index) {
                     const data = if (data_len > 0) try self.allocator.alloc(u8, data_len) else &.{};
-                    if (data_len > 0) _ = try file.preadAll(data, pos + 20);
-                    try entries.append(self.allocator, LogEntryOwned{ .term = entry_term, .index = entry_index, .entry_type = .command, .data = data });
+                    if (data_len > 0) _ = try file.preadAll(data, pos + 21);
+                    try entries.append(self.allocator, LogEntryOwned{ .term = entry_term, .index = entry_index, .entry_type = entry_type, .data = data });
                 }
-                pos += 20 + data_len;
+                pos += 21 + data_len;
             }
         }
 
@@ -288,10 +291,11 @@ pub const FileStorage = struct {
             defer tmp_file.close();
 
             for (entries.items) |*entry| {
-                var hdr: [20]u8 = undefined;
+                var hdr: [21]u8 = undefined;
                 mem.writeInt(u64, hdr[0..8], entry.index, .little);
                 mem.writeInt(u64, hdr[8..16], entry.term, .little);
-                mem.writeInt(u32, hdr[16..20], @as(u32, @intCast(entry.data.len)), .little);
+                hdr[16] = @intFromEnum(entry.entry_type);
+                mem.writeInt(u32, hdr[17..21], @as(u32, @intCast(entry.data.len)), .little);
                 try tmp_file.writeAll(&hdr);
                 if (entry.data.len > 0) try tmp_file.writeAll(entry.data);
             }
