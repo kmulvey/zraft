@@ -1,0 +1,14 @@
+.{
+    .name = .raft,
+    .version = "0.1.0",
+    .fingerprint = 0xcda86f185d86a7ed,
+    .description = "A Raft consensus library for Zig",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE",
+        "README.md",
+    },
+}
