@@ -82,6 +82,16 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
         /// Last included term from the first chunk of the current snapshot.
         snapshot_recv_last_term: Term = 0,
 
+        // ---- Quorum tracking (leader step-down, §5.2) ----
+        /// Timestamp of the last time the leader confirmed quorum via peer responses.
+        last_quorum_ns: u64 = 0,
+        /// Bitmask tracking which peers have responded since last quorum confirmation.
+        quorum_peer_mask: u64 = 0,
+
+        // ---- Leader identity ----
+        /// The current leader's server ID (null if unknown).
+        current_leader: ?ServerId = null,
+
         last_heartbeat_ns: u64 = 0,
         election_start_ns: u64 = 0,
         election_timeout_ns: u64 = 0,
@@ -177,6 +187,25 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
         fn tickLeader(self: *Self, now_ns: u64) !void {
             if (now_ns < self.last_heartbeat_ns + self.config.heartbeat_interval_ns) return;
             self.last_heartbeat_ns = now_ns;
+
+            // Check if we have quorum: enough unique peers have responded
+            // since the last tick. Reset the mask each round.
+            const responded = @popCount(self.quorum_peer_mask) + 1; // +1 for self
+            if (responded >= self.active_config.quorum()) {
+                self.last_quorum_ns = now_ns;
+            }
+            self.quorum_peer_mask = 0;
+
+            // §5.2: If the leader hasn't heard from a quorum within the election
+            // timeout, step down to allow a new election. Prevents split-brain
+            // during asymmetric network partitions.
+            if (self.last_quorum_ns > 0 and self.peer_ids.len > 0) {
+                if (now_ns - self.last_quorum_ns > self.config.election_timeout_max_ns) {
+                    try self.stepDown(self.current_term + 1);
+                    return;
+                }
+            }
+
             try self.broadcastAppendEntries(now_ns);
         }
 
@@ -318,6 +347,9 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
                 }
                 self.election_start_ns = now_ns;
             }
+
+            // Record the leader's identity.
+            self.current_leader = req.leader_id;
 
             // §6: Follower learns the leader's config from AppendEntries.
             // If the leader has a config at a higher index than ours, update our config.
@@ -630,6 +662,9 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
             self.confirmed_read_round = 0;
             self.responses_since_read = 0;
             self.responses_needed_for_read = 0;
+            self.current_leader = null;
+            self.last_quorum_ns = 0;
+            self.quorum_peer_mask = 0;
         }
 
         fn randomiseElectionTimeout(self: *Self) void {
@@ -785,6 +820,12 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
                         self.confirmed_read_round = self.pending_read_round;
                     }
                 }
+                // Track quorum liveness: mark this peer as having responded.
+                // tickLeader checks accumulated bits to confirm quorum.
+                if (self.active_config.contains(peer)) {
+                    const bit = @as(u64, 1) << @as(u6, @intCast(peer_idx));
+                    self.quorum_peer_mask |= bit;
+                }
             } else if (self.next_index[peer_idx] > 1) {
                 if (resp.conflict_term > 0) {
                     var new_next = self.next_index[peer_idx] - 1;
@@ -821,6 +862,9 @@ pub fn Node(comptime SM: type, comptime ST: type) type {
         pub fn becomeLeader(self: *Self) !void {
             self.role = .leader;
             self.voted_for = null;
+            self.current_leader = self.config.id;
+            self.last_quorum_ns = 0;
+            self.quorum_peer_mask = 0;
             const last_idx = self.log.lastIndex() + 1;
             for (self.next_index, 0..) |*ni, i| { ni.* = last_idx; self.match_index[i] = 0; }
 
