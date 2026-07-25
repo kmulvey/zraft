@@ -104,7 +104,7 @@ test "ClusterConfig serialization round-trip" {
     const data = try original.serialize(allocator);
     defer allocator.free(data);
 
-    const restored = try ClusterConfig.deserialize(data, allocator);
+    var restored = try ClusterConfig.deserialize(data, allocator);
     defer restored.deinit(allocator);
 
     try std.testing.expectEqual(@as(usize, 4), restored.len());

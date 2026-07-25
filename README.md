@@ -107,6 +107,7 @@ pub fn loadLastLogIndex(ptr: *MyStorage) u64;
 pub fn loadLogEntry(ptr: *MyStorage, index: u64, allocator: std.mem.Allocator) ?storage.LogEntryOwned;
 pub fn appendLogEntry(ptr: *MyStorage, entry: storage.LogEntryOwned) !void;
 pub fn truncateLog(ptr: *MyStorage, last_kept_index: u64) !void;
+pub fn dropLogPrefix(ptr: *MyStorage, last_included_index: u64) !void;
 pub fn sync(ptr: *MyStorage) !void;
 pub fn storeSnapshot(ptr: *MyStorage, last_included_index: u64, last_included_term: u64, data: []const u8) !void;
 pub fn loadSnapshot(ptr: *MyStorage, allocator: std.mem.Allocator) ?storage.SnapshotData;
@@ -228,7 +229,7 @@ try node.handleAppendEntriesResponse(2, response);
 | `handleRequestVote(req) !ResponseVoteResponse` | §5.2 — incoming vote request |
 | `handlePreVote(req) PreVoteResponse` | §9.6 — incoming pre-vote request |
 | `handleAppendEntries(req, now_ns) !AppendEntriesResponse` | §5.3 — incoming log replication |
-| `handleInstallSnapshot(req) !InstallSnapshotResponse` | §7 — incoming snapshot install |
+| `handleInstallSnapshot(req, now_ns) !InstallSnapshotResponse` | §7 — incoming snapshot install |
 | `handleAppendEntriesResponse(peer, resp) !void` | Leader: process replication response |
 | `handleRequestVoteResponse(peer, resp) !void` | Candidate: process vote response |
 | `handlePreVoteResponse(peer, resp) !void` | Pre-candidate: process pre-vote response |
@@ -238,6 +239,7 @@ try node.handleAppendEntriesResponse(2, response);
 | `clusterChangeRequest(new_servers) !void` | §6 — initiate membership change |
 | `becomeLeader() !void` | Transition to leader (appends no-op) |
 | `takeSnapshot() !void` | §7 — compact log via snapshot |
+| `applyCommittedEntries() !void` | Apply committed entries to the state machine |
 | `lastApplied() LogIndex` | Highest log index applied to SM |
 | `commitIndex() LogIndex` | Highest committed log index |
 
@@ -276,11 +278,11 @@ try node.handleAppendEntriesResponse(2, response);
 ## Testing
 
 ```bash
-zig build test          # Run all 48 tests across 12 suites
+zig build test          # Run all test suites
 zig build test-snapshot # Run a specific suite
 ```
 
-Test suites: `test-protocol`, `test-state`, `test-election`, `test-replication`, `test-integration`, `test-snapshot`, `test-membership`, `test-pre-vote`, `test-read-index`, `test-pipeline`, `test-validation`.
+Test suites: `test-protocol`, `test-state`, `test-election`, `test-replication`, `test-integration`, `test-snapshot`, `test-snapshot-chunked`, `test-filestorage`, `test-membership`, `test-pre-vote`, `test-read-index`, `test-pipeline`, `test-validation`, `test-safety`, `test-fuzz`, `test-sim`.
 
 ---
 

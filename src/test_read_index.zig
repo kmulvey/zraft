@@ -179,3 +179,37 @@ test "lastApplied and commitIndex getters" {
     try std.testing.expectEqual(@as(u64, 1), node.commitIndex());
     try std.testing.expectEqual(@as(u64, 1), node.lastApplied());
 }
+
+
+test "duplicate read responses do not spuriously confirm quorum" {
+    const allocator = std.testing.allocator;
+    var mstore = mem_storage.MemoryStorage.init(allocator);
+    defer mstore.deinit();
+    var log = try LogType.init(allocator, &mstore, 4);
+    defer log.deinit();
+    var sm_impl = TestSM{};
+    var node = try NodeType.init(allocator, .{ .id = 1, .peers = &.{ 2, 3, 4 }, .election_timeout_min_ns = 50_000_000, .election_timeout_max_ns = 100_000_000, .heartbeat_interval_ns = 25_000_000 }, &log, .{ .ptr = &sm_impl, .applyFn = TestSM.apply, .snapshotFn = TestSM.snapshot, .restoreFn = TestSM.restore }, mstore.toStorage(), 12345);
+    defer node.deinit();
+
+    // Leader with a committed entry from current term.
+    node.role = .leader;
+    node.current_term = 2;
+    _ = try node.log.append(1, "e1");
+    _ = try node.log.append(2, "e2");
+    node.commit_index = 2;
+    node.last_applied = 2;
+
+    // Active config {1,2,3,4} has quorum 3, so 2 peer responses are needed.
+    const read_idx = try node.readIndex();
+    try std.testing.expect(!node.isReadSafe(read_idx));
+
+    // Repeated responses from the same peer must not confirm the round.
+    try node.handleAppendEntriesResponse(2, .{ .term = 2, .success = true, .last_confirmed_index = 2 });
+    try node.handleAppendEntriesResponse(2, .{ .term = 2, .success = true, .last_confirmed_index = 2 });
+    try node.handleAppendEntriesResponse(2, .{ .term = 2, .success = true, .last_confirmed_index = 2 });
+    try std.testing.expect(!node.isReadSafe(read_idx));
+
+    // A second distinct peer makes the quorum.
+    try node.handleAppendEntriesResponse(3, .{ .term = 2, .success = true, .last_confirmed_index = 2 });
+    try std.testing.expect(node.isReadSafe(read_idx));
+}

@@ -4,7 +4,7 @@
 //!
 //!   <base_dir>/raft-<my_id>/
 //!     metadata.bin   — fixed-size: currentTerm (u8×8) + votedFor (u8×8, all-0xFF = null)
-//!     wal.bin        — append-only log entries
+//!     wal.bin        — append-only entry log
 //!     snapshot.bin   — snapshot: last_included_index (u64) + last_included_term (u64) + data_len (u64) + data
 
 const std = @import("std");
@@ -21,42 +21,60 @@ const LogEntryOwned = storage.LogEntryOwned;
 const SnapshotData = storage.SnapshotData;
 
 const NULL_VOTED_FOR: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+const WAL_ENTRY_HEADER_LEN: usize = 21;
 
-/// Check a linux syscall return: 0 = success, negative = errno.
-fn checkSyscall(ret: usize) !void {
-    const signed = -@as(i32, @intCast(ret));
-    if (signed >= 0) return;
-    return posix.unexpectedErrno(posix.errno(signed));
+fn checkErrno(ret: usize) !void {
+    const e = linux.errno(ret);
+    if (e == .SUCCESS) return;
+    return error.Unexpected;
 }
 
-/// Wrapper around linux.pread that returns the bytes read or a Zig error.
-fn preadAll(fd: posix.fd_t, buf: []u8, offset: i64) !usize {
-    const ret = linux.pread(fd, buf.ptr, buf.len, offset);
-    const signed = -@as(i32, @intCast(ret));
-    if (signed < 0) return posix.unexpectedErrno(posix.errno(signed));
-    return ret;
+/// Loop until the whole buffer is written.
+fn writeAll(fd: posix.fd_t, buf: []const u8) !void {
+    var off: usize = 0;
+    while (off < buf.len) {
+        const ret = linux.write(fd, buf[off..].ptr, buf[off..].len);
+        const e = linux.errno(ret);
+        if (e != .SUCCESS) return error.Unexpected;
+        if (ret == 0) return error.Unexpected;
+        off += ret;
+    }
 }
 
-/// Wrapper around linux.write that returns the bytes written or a Zig error.
-fn writeAll(fd: posix.fd_t, buf: []const u8) !usize {
-    const ret = linux.write(fd, buf.ptr, buf.len);
-    const signed = -@as(i32, @intCast(ret));
-    if (signed < 0) return posix.unexpectedErrno(posix.errno(signed));
-    return ret;
+/// Loop until the whole buffer is read from the current file offset.
+fn readAll(fd: posix.fd_t, buf: []u8) !void {
+    var off: usize = 0;
+    while (off < buf.len) {
+        const n = try posix.read(fd, buf[off..]);
+        if (n == 0) return error.Unexpected;
+        off += n;
+    }
+}
+
+/// Loop until the whole buffer is pread from the given offset.
+fn preadAll(fd: posix.fd_t, buf: []u8, offset: i64) !void {
+    var off: usize = 0;
+    while (off < buf.len) {
+        const ret = linux.pread(fd, buf[off..].ptr, buf[off..].len, offset + @as(i64, @intCast(off)));
+        const e = linux.errno(ret);
+        if (e != .SUCCESS) return error.Unexpected;
+        if (ret == 0) return error.Unexpected;
+        off += ret;
+    }
 }
 
 pub const FileStorage = struct {
     allocator: std.mem.Allocator,
     dir_fd: posix.fd_t,
+    wal_fd: posix.fd_t,
     server_id: ServerId,
     current_term: Term,
     voted_for: ?ServerId,
     last_log_index: LogIndex,
-    max_wal_bytes: usize,
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, base_dir: []const u8, server_id: ServerId, max_wal_bytes: usize) !Self {
+    pub fn init(allocator: std.mem.Allocator, base_dir: []const u8, server_id: ServerId) !Self {
         var buf: [256]u8 = undefined;
         const dirname = try std.fmt.bufPrintZ(&buf, "raft-{}", .{server_id});
 
@@ -73,14 +91,23 @@ pub const FileStorage = struct {
         errdefer _ = linux.close(dir_fd);
         _ = linux.close(base_fd);
 
+        // Open WAL once for appending and reading.
+        const wal_fd = try posix.openat(dir_fd, "wal.bin", posix.O{
+            .ACCMODE = .RDWR,
+            .CREAT = true,
+            .APPEND = true,
+            .CLOEXEC = true,
+        }, 0o644);
+        errdefer _ = linux.close(wal_fd);
+
         var self = Self{
             .allocator = allocator,
             .dir_fd = dir_fd,
+            .wal_fd = wal_fd,
             .server_id = server_id,
             .current_term = 0,
             .voted_for = null,
             .last_log_index = 0,
-            .max_wal_bytes = max_wal_bytes,
         };
         try self.loadMetadata();
         try self.rebuildLastLogIndex();
@@ -88,6 +115,7 @@ pub const FileStorage = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        _ = linux.close(self.wal_fd);
         _ = linux.close(self.dir_fd);
         self.* = undefined;
     }
@@ -112,12 +140,20 @@ pub const FileStorage = struct {
     }
 
     pub fn truncateLog(ptr: *Self, last_kept_index: LogIndex) !void {
-        try ptr.compactWal(last_kept_index);
-        ptr.last_log_index = last_kept_index;
+        try ptr.compactWalTail(last_kept_index);
+        ptr.last_log_index = @min(ptr.last_log_index, last_kept_index);
+    }
+
+    pub fn dropLogPrefix(ptr: *Self, last_included_index: LogIndex) !void {
+        try ptr.compactWalPrefix(last_included_index);
+        // After dropping the prefix, indices <= last_included are gone.
+        if (ptr.last_log_index <= last_included_index) {
+            ptr.last_log_index = 0;
+        }
     }
 
     pub fn sync(ptr: *Self) !void {
-        try checkSyscall(linux.fsync(ptr.dir_fd));
+        try checkErrno(linux.fsync(ptr.wal_fd));
     }
 
     // ------------------------------------------------------------------
@@ -133,11 +169,12 @@ pub const FileStorage = struct {
         mem.writeInt(u64, header[8..16], last_included_term, .little);
         mem.writeInt(u64, header[16..24], @as(u64, @intCast(data.len)), .little);
 
-        _ = try writeAll(tmp_file, &header);
-        if (data.len > 0) _ = try writeAll(tmp_file, data);
+        try writeAll(tmp_file, &header);
+        if (data.len > 0) try writeAll(tmp_file, data);
 
-        try checkSyscall(linux.fsync(tmp_file));
-        try checkSyscall(linux.renameat(ptr.dir_fd, "snapshot.tmp", ptr.dir_fd, "snapshot.bin"));
+        try checkErrno(linux.fsync(tmp_file));
+        try checkErrno(linux.renameat(ptr.dir_fd, "snapshot.tmp", ptr.dir_fd, "snapshot.bin"));
+        try checkErrno(linux.fsync(ptr.dir_fd));
     }
 
     pub fn loadSnapshot(ptr: *Self, allocator: std.mem.Allocator) ?SnapshotData {
@@ -145,20 +182,15 @@ pub const FileStorage = struct {
         defer _ = linux.close(file);
 
         var header: [24]u8 = undefined;
-        const n = posix.read(file, &header) catch return null;
-        if (n < 24) return null;
+        readAll(file, &header) catch return null;
 
         const last_index = mem.readInt(u64, header[0..8], .little);
         const last_term = mem.readInt(u64, header[8..16], .little);
         const data_len: usize = @intCast(mem.readInt(u64, header[16..24], .little));
 
         const data = if (data_len > 0) allocator.alloc(u8, data_len) catch return null else @as([]u8, &.{});
-        if (data_len > 0) {
-            _ = posix.read(file, data) catch {
-                if (data.len > 0) allocator.free(data);
-                return null;
-            };
-        }
+        errdefer if (data.len > 0) allocator.free(data);
+        if (data_len > 0) readAll(file, data) catch return null;
         return SnapshotData{ .last_included_index = last_index, .last_included_term = last_term, .data = data };
     }
 
@@ -188,8 +220,8 @@ pub const FileStorage = struct {
         var data: [16]u8 = undefined;
         mem.writeInt(u64, data[0..8], self.current_term, .little);
         mem.writeInt(u64, data[8..16], self.voted_for orelse NULL_VOTED_FOR, .little);
-        _ = try writeAll(file, &data);
-        try checkSyscall(linux.fsync(file));
+        try writeAll(file, &data);
+        try checkErrno(linux.fsync(file));
     }
 
     fn loadMetadata(self: *Self) !void {
@@ -210,45 +242,27 @@ pub const FileStorage = struct {
     // ------------------------------------------------------------------
 
     fn writeEntry(self: *Self, entry: *const LogEntryOwned) !void {
-        const file = try posix.openat(self.dir_fd, "wal.bin", posix.O{ .ACCMODE = .WRONLY, .CREAT = true, .CLOEXEC = true }, 0o644);
-        defer _ = linux.close(file);
-
-        // Seek to end for append.
-        const seek_ret = linux.lseek(file, 0, @intCast(posix.SEEK.END));
-        if (@as(i64, @bitCast(seek_ret)) < 0) {
-            return posix.unexpectedErrno(posix.errno(-@as(i32, @intCast(seek_ret))));
-        }
-
-        var header: [21]u8 = undefined;
+        var header: [WAL_ENTRY_HEADER_LEN]u8 = undefined;
         mem.writeInt(u64, header[0..8], entry.index, .little);
         mem.writeInt(u64, header[8..16], entry.term, .little);
         header[16] = @intFromEnum(entry.entry_type);
         mem.writeInt(u32, header[17..21], @as(u32, @intCast(entry.data.len)), .little);
-        _ = try writeAll(file, &header);
-        if (entry.data.len > 0) _ = try writeAll(file, entry.data);
-
-        try checkSyscall(linux.fsync(file));
+        try writeAll(self.wal_fd, &header);
+        if (entry.data.len > 0) try writeAll(self.wal_fd, entry.data);
+        try checkErrno(linux.fsync(self.wal_fd));
     }
 
     fn readEntry(self: *Self, index: LogIndex, allocator: std.mem.Allocator) !?LogEntryOwned {
-        const file = posix.openat(self.dir_fd, "wal.bin", posix.O{ .CLOEXEC = true }, 0) catch |err| switch (err) {
-            error.FileNotFound => return null,
-            else => |e| return e,
-        };
-        defer _ = linux.close(file);
-
-        // Get file size.
         const file_size = blk: {
-            const sz = linux.lseek(file, 0, @intCast(posix.SEEK.END));
+            const sz = linux.lseek(self.wal_fd, 0, @intCast(posix.SEEK.END));
             if (@as(i64, @bitCast(sz)) < 0) return null;
             break :blk @as(u64, @intCast(sz));
         };
 
         var pos: u64 = 0;
         while (pos < file_size) {
-            var header: [21]u8 = undefined;
-            const n = try preadAll(file, &header, @intCast(pos));
-            if (n < 21) return null;
+            var header: [WAL_ENTRY_HEADER_LEN]u8 = undefined;
+            try preadAll(self.wal_fd, &header, @intCast(pos));
             const entry_index = mem.readInt(u64, header[0..8], .little);
             const entry_term = mem.readInt(u64, header[8..16], .little);
             const entry_type: types.EntryType = @enumFromInt(header[16]);
@@ -256,37 +270,29 @@ pub const FileStorage = struct {
 
             if (entry_index == index) {
                 const data = if (data_len > 0) try allocator.alloc(u8, data_len) else @as([]u8, &.{});
-                if (data_len > 0) _ = try preadAll(file, data, @intCast(pos + 21));
+                if (data_len > 0) try preadAll(self.wal_fd, data, @intCast(pos + WAL_ENTRY_HEADER_LEN));
                 return LogEntryOwned{ .term = entry_term, .index = entry_index, .entry_type = entry_type, .data = data };
             }
-            pos += 21 + data_len;
+            pos += WAL_ENTRY_HEADER_LEN + data_len;
         }
         return null;
     }
 
     fn rebuildLastLogIndex(self: *Self) !void {
-        const file = posix.openat(self.dir_fd, "wal.bin", posix.O{ .CLOEXEC = true }, 0) catch |err| switch (err) {
-            error.FileNotFound => return,
-            else => |e| return e,
-        };
-        defer _ = linux.close(file);
-
-        // Get file size.
         const file_size = blk: {
-            const sz = linux.lseek(file, 0, @intCast(posix.SEEK.END));
+            const sz = linux.lseek(self.wal_fd, 0, @intCast(posix.SEEK.END));
             if (@as(i64, @bitCast(sz)) < 0) return;
             break :blk @as(u64, @intCast(sz));
         };
 
         var pos: u64 = 0;
         while (pos < file_size) {
-            var header: [21]u8 = undefined;
-            const n = preadAll(file, &header, @intCast(pos)) catch break;
-            if (n < 21) break;
+            var header: [WAL_ENTRY_HEADER_LEN]u8 = undefined;
+            preadAll(self.wal_fd, &header, @intCast(pos)) catch break;
             const entry_index = mem.readInt(u64, header[0..8], .little);
             const data_len: usize = @intCast(mem.readInt(u32, header[17..21], .little));
             self.last_log_index = @max(self.last_log_index, entry_index);
-            pos += 21 + data_len;
+            pos += WAL_ENTRY_HEADER_LEN + data_len;
         }
     }
 
@@ -294,58 +300,62 @@ pub const FileStorage = struct {
     // Internal: compaction
     // ------------------------------------------------------------------
 
-    fn compactWal(self: *Self, last_kept_index: LogIndex) !void {
-        const src_file = posix.openat(self.dir_fd, "wal.bin", posix.O{ .CLOEXEC = true }, 0) catch |err| switch (err) {
-            error.FileNotFound => return,
-            else => |e| return e,
-        };
-        defer _ = linux.close(src_file);
+    /// Stream WAL entries, keeping those with index <= last_kept_index (tail truncate).
+    fn compactWalTail(self: *Self, last_kept_index: LogIndex) !void {
+        try self.compactWal(last_kept_index, true);
+    }
 
-        // Get source file size.
+    /// Stream WAL entries, keeping those with index > last_included_index (prefix drop).
+    fn compactWalPrefix(self: *Self, last_included_index: LogIndex) !void {
+        try self.compactWal(last_included_index, false);
+    }
+
+    fn compactWal(self: *Self, boundary: LogIndex, keep_le: bool) !void {
         const file_size = blk: {
-            const sz = linux.lseek(src_file, 0, @intCast(posix.SEEK.END));
+            const sz = linux.lseek(self.wal_fd, 0, @intCast(posix.SEEK.END));
             if (@as(i64, @bitCast(sz)) < 0) return;
             break :blk @as(u64, @intCast(sz));
         };
+        if (file_size == 0) return;
 
-        // Create temp file.
         const tmp_file = try posix.openat(self.dir_fd, "wal.tmp", posix.O{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o644);
         defer _ = linux.close(tmp_file);
 
-        // Stream entries: read from source, write matching ones to temp.
         var pos: u64 = 0;
         var highest_kept_index: LogIndex = 0;
         while (pos < file_size) {
-            var header: [21]u8 = undefined;
-            const n = preadAll(src_file, &header, @intCast(pos)) catch break;
-            if (n < 21) break;
+            var header: [WAL_ENTRY_HEADER_LEN]u8 = undefined;
+            preadAll(self.wal_fd, &header, @intCast(pos)) catch break;
             const entry_index = mem.readInt(u64, header[0..8], .little);
-            const entry_term = mem.readInt(u64, header[8..16], .little);
-            const entry_type: types.EntryType = @enumFromInt(header[16]);
             const data_len: usize = @intCast(mem.readInt(u32, header[17..21], .little));
 
-            if (entry_index <= last_kept_index) {
+            const keep = if (keep_le) entry_index <= boundary else entry_index > boundary;
+            if (keep) {
                 const data = if (data_len > 0) try self.allocator.alloc(u8, data_len) else @as([]u8, &.{});
                 defer if (data.len > 0) self.allocator.free(data);
-                if (data_len > 0) _ = try preadAll(src_file, data, @intCast(pos + 21));
+                if (data_len > 0) try preadAll(self.wal_fd, data, @intCast(pos + WAL_ENTRY_HEADER_LEN));
 
-                var hdr: [21]u8 = undefined;
-                mem.writeInt(u64, hdr[0..8], entry_index, .little);
-                mem.writeInt(u64, hdr[8..16], entry_term, .little);
-                hdr[16] = @intFromEnum(entry_type);
-                mem.writeInt(u32, hdr[17..21], @as(u32, @intCast(data_len)), .little);
-                _ = try writeAll(tmp_file, &hdr);
-                if (data.len > 0) _ = try writeAll(tmp_file, data);
-
+                try writeAll(tmp_file, &header);
+                if (data.len > 0) try writeAll(tmp_file, data);
                 highest_kept_index = entry_index;
             }
-            pos += 21 + data_len;
+            pos += WAL_ENTRY_HEADER_LEN + data_len;
         }
 
-        try checkSyscall(linux.fsync(tmp_file));
-        try checkSyscall(linux.renameat(self.dir_fd, "wal.tmp", self.dir_fd, "wal.bin"));
+        try checkErrno(linux.fsync(tmp_file));
+        try checkErrno(linux.renameat(self.dir_fd, "wal.tmp", self.dir_fd, "wal.bin"));
+        try checkErrno(linux.fsync(self.dir_fd));
 
-        self.last_log_index = highest_kept_index;
+        // Re-open the renamed WAL.
+        _ = linux.close(self.wal_fd);
+        self.wal_fd = try posix.openat(self.dir_fd, "wal.bin", posix.O{
+            .ACCMODE = .RDWR,
+            .CREAT = true,
+            .APPEND = true,
+            .CLOEXEC = true,
+        }, 0o644);
+
+        if (keep_le) self.last_log_index = highest_kept_index;
     }
 
     /// Wrap this FileStorage in a Storage(FileStorage) interface.
@@ -360,6 +370,7 @@ pub const FileStorage = struct {
             .loadLogEntryFn = FileStorage.loadLogEntry,
             .appendLogEntryFn = FileStorage.appendLogEntry,
             .truncateLogFn = FileStorage.truncateLog,
+            .dropLogPrefixFn = FileStorage.dropLogPrefix,
             .syncFn = FileStorage.sync,
             .storeSnapshotFn = FileStorage.storeSnapshot,
             .loadSnapshotFn = FileStorage.loadSnapshot,
@@ -368,49 +379,3 @@ pub const FileStorage = struct {
         };
     }
 };
-
-test "FileStorage init creates directories and files" {
-    const allocator = std.testing.allocator;
-    const test_dir = "tmp-test-filestorage";
-    std.fs.deleteTreeAbsolute(test_dir) catch {};
-    var st = try FileStorage.init(allocator, test_dir, 1, 1024 * 1024);
-    defer { st.deinit(); std.fs.deleteTreeAbsolute(test_dir) catch {}; }
-    try std.testing.expectEqual(@as(Term, 0), st.loadTerm());
-    try std.testing.expectEqual(@as(?ServerId, null), st.loadVotedFor());
-    try std.testing.expectEqual(@as(LogIndex, 0), st.loadLastLogIndex());
-}
-
-test "FileStorage round-trip term and votedFor" {
-    const allocator = std.testing.allocator;
-    const test_dir = "tmp-test-filestorage2";
-    std.fs.deleteTreeAbsolute(test_dir) catch {};
-    {
-        var st = try FileStorage.init(allocator, test_dir, 2, 1024 * 1024);
-        defer st.deinit();
-        try st.storeTerm(42);
-        try st.storeVotedFor(7);
-        try std.testing.expectEqual(@as(Term, 42), st.loadTerm());
-        try std.testing.expectEqual(@as(?ServerId, 7), st.loadVotedFor());
-    }
-    {
-        var st = try FileStorage.init(allocator, test_dir, 2, 1024 * 1024);
-        defer st.deinit();
-        try std.testing.expectEqual(@as(Term, 42), st.loadTerm());
-        try std.testing.expectEqual(@as(?ServerId, 7), st.loadVotedFor());
-    }
-    std.fs.deleteTreeAbsolute(test_dir) catch {};
-}
-
-test "FileStorage append and read log entry" {
-    const allocator = std.testing.allocator;
-    const test_dir = "tmp-test-filestorage3";
-    std.fs.deleteTreeAbsolute(test_dir) catch {};
-    var st = try FileStorage.init(allocator, test_dir, 3, 1024 * 1024);
-    defer { st.deinit(); std.fs.deleteTreeAbsolute(test_dir) catch {}; }
-    const data = try allocator.dupe(u8, "hello-raft");
-    defer allocator.free(data);
-    try st.appendLogEntry(.{ .term = 1, .index = 1, .data = data });
-    const loaded = st.loadLogEntry(1, allocator);
-    try std.testing.expect(loaded != null);
-    if (loaded) |e| { defer e.deinit(allocator); try std.testing.expectEqualStrings("hello-raft", e.data); }
-}

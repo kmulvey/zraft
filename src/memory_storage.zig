@@ -70,6 +70,23 @@ pub const MemoryStorage = struct {
         }
     }
 
+    pub fn dropLogPrefix(ptr: *MemoryStorage, last_included_index: LogIndex) !void {
+        var i: usize = 0;
+        while (i < ptr.entries.items.len) {
+            if (ptr.entries.items[i].index > last_included_index) {
+                if (i > 0) {
+                    for (ptr.entries.items[0..i]) |*e| e.deinit(ptr.allocator);
+                    ptr.entries.replaceRange(ptr.allocator, 0, i, &.{}) catch {};
+                }
+                return;
+            }
+            i += 1;
+        }
+        // All entries are <= last_included_index: drop everything.
+        for (ptr.entries.items) |*e| e.deinit(ptr.allocator);
+        ptr.entries.shrinkRetainingCapacity(0);
+    }
+
     pub fn sync(ptr: *MemoryStorage) !void { _ = ptr; }
 
     // --- Snapshot methods ---
@@ -107,6 +124,7 @@ pub const MemoryStorage = struct {
             .loadLogEntryFn = MemoryStorage.loadLogEntry,
             .appendLogEntryFn = MemoryStorage.appendLogEntry,
             .truncateLogFn = MemoryStorage.truncateLog,
+            .dropLogPrefixFn = MemoryStorage.dropLogPrefix,
             .syncFn = MemoryStorage.sync,
             .storeSnapshotFn = MemoryStorage.storeSnapshot,
             .loadSnapshotFn = MemoryStorage.loadSnapshot,

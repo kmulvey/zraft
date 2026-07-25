@@ -53,7 +53,7 @@ test "chunked snapshot accumulate and restore" {
             .offset = offset,
             .data = chunk,
             .done = done,
-        });
+        }, 1_000_000);
         try std.testing.expect(resp.success);
         last_idx = 5;
         last_term = 2;
@@ -81,7 +81,7 @@ test "chunked snapshot out-of-order chunk ignored" {
     const resp1 = try node.handleInstallSnapshot(.{
         .term = 1, .leader_id = 1, .last_included_index = 5, .last_included_term = 2,
         .offset = 10, .data = "later data", .done = false,
-    });
+    }, 1_000_000);
     try std.testing.expect(resp1.success);
     // Buffer should still be empty
     try std.testing.expectEqual(@as(u64, 0), node.snapshot_recv_offset);
@@ -90,7 +90,7 @@ test "chunked snapshot out-of-order chunk ignored" {
     const resp2 = try node.handleInstallSnapshot(.{
         .term = 1, .leader_id = 1, .last_included_index = 5, .last_included_term = 2,
         .offset = 0, .data = "first chunk", .done = false,
-    });
+    }, 1_000_000);
     try std.testing.expect(resp2.success);
     try std.testing.expectEqual(@as(u64, 11), node.snapshot_recv_offset);
 }
@@ -110,14 +110,14 @@ test "chunked snapshot resend from leader restarts receive" {
     _ = try node.handleInstallSnapshot(.{
         .term = 1, .leader_id = 1, .last_included_index = 5, .last_included_term = 2,
         .offset = 0, .data = "first part ", .done = false,
-    });
+    }, 1_000_000);
     try std.testing.expectEqual(@as(u64, 11), node.snapshot_recv_offset);
 
     // Leader resends from offset 0 (e.g., after timeout) — should restart
     _ = try node.handleInstallSnapshot(.{
         .term = 1, .leader_id = 1, .last_included_index = 5, .last_included_term = 2,
         .offset = 0, .data = "restarted ", .done = true,
-    });
+    }, 1_000_000);
 
     // After done with the restarted snapshot, it should be applied
     try std.testing.expectEqual(@as(u64, 5), node.snapshot_index);

@@ -39,6 +39,7 @@ pub fn Storage(comptime T: type) type {
 
         appendLogEntryFn: *const fn (ptr: *T, entry: LogEntryOwned) anyerror!void,
         truncateLogFn: *const fn (ptr: *T, last_kept_index: LogIndex) anyerror!void,
+        dropLogPrefixFn: *const fn (ptr: *T, last_included_index: LogIndex) anyerror!void,
         syncFn: *const fn (ptr: *T) anyerror!void,
 
         // --- Snapshots (§7) ---
@@ -56,6 +57,7 @@ pub fn Storage(comptime T: type) type {
         pub fn loadLogEntry(self: Self, index: LogIndex, allocator: std.mem.Allocator) ?LogEntryOwned { return self.loadLogEntryFn(self.ptr, index, allocator); }
         pub fn appendLogEntry(self: Self, entry: LogEntryOwned) !void { try self.appendLogEntryFn(self.ptr, entry); }
         pub fn truncateLog(self: Self, last_kept_index: LogIndex) !void { try self.truncateLogFn(self.ptr, last_kept_index); }
+        pub fn dropLogPrefix(self: Self, last_included_index: LogIndex) !void { try self.dropLogPrefixFn(self.ptr, last_included_index); }
         pub fn sync(self: Self) !void { try self.syncFn(self.ptr); }
 
         pub fn storeSnapshot(self: Self, last_included_index: LogIndex, last_included_term: Term, data: []const u8) !void {

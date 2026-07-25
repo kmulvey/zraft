@@ -20,11 +20,13 @@ pub fn build(b: *std.Build) void {
         .{ .name = "test-integration", .path = "src/test_integration.zig" },
         .{ .name = "test-snapshot", .path = "src/test_snapshot.zig" },
         .{ .name = "test-snapshot-chunked", .path = "src/test_snapshot_chunked.zig" },
+        .{ .name = "test-filestorage", .path = "src/test_filestorage.zig" },
         .{ .name = "test-membership", .path = "src/test_membership.zig" },
         .{ .name = "test-pre-vote", .path = "src/test_pre_vote.zig" },
         .{ .name = "test-read-index", .path = "src/test_read_index.zig" },
         .{ .name = "test-pipeline", .path = "src/test_pipeline.zig" },
         .{ .name = "test-validation", .path = "src/test_validation.zig" },
+        .{ .name = "test-safety", .path = "src/test_safety.zig" },
         .{ .name = "test-fuzz", .path = "src/test_fuzz.zig" },
         .{ .name = "test-sim", .path = "src/test_sim.zig" },
     };
@@ -47,7 +49,8 @@ pub fn build(b: *std.Build) void {
         const run_test = b.addRunArtifact(test_exe);
 
         // Register as individual step
-        _ = b.step(t.name, t.name);
+        const suite_step = b.step(t.name, t.name);
+        suite_step.dependOn(&run_test.step);
         // Make top-level test depend on this suite
         all_tests.dependOn(&run_test.step);
     }

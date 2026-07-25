@@ -44,10 +44,21 @@ fn checkInvariants(node: *NodeType) !void {
     }
     // last_applied should not exceed commit_index.
     try std.testing.expect(node.last_applied <= node.commit_index);
-    // Role consistency: candidate must have voted for self.
+    // Snapshot state is consistent: log base must cover the snapshot index,
+    // and commit/applied indices must not lag behind the persisted snapshot.
+    try std.testing.expect(node.log.baseIndex() <= node.snapshot_index);
+    try std.testing.expect(node.commit_index >= node.snapshot_index);
+    try std.testing.expect(node.last_applied >= node.snapshot_index);
+    // Role consistency: candidate must have voted for self; leader must know
+    // it is the current leader.
     if (node.role == .candidate) {
         try std.testing.expectEqual(node.config.id, node.voted_for);
     }
+    if (node.role == .leader) {
+        try std.testing.expectEqual(node.config.id, node.current_leader);
+    }
+    // ReadIndex round monotonicity: confirmed round never runs ahead of pending.
+    try std.testing.expect(node.confirmed_read_round <= node.pending_read_round);
 }
 
 /// Fuzz a single node through random RPCs, ticks, and client operations.
@@ -130,7 +141,7 @@ fn fuzzNode(allocator: std.mem.Allocator, rng: std.Random) !void {
                     .offset = 0,
                     .data = if (rng.boolean()) "snap-data" else &.{},
                     .done = rng.boolean(),
-                }) catch continue;
+                }, rng.int(u64)) catch continue;
                 _ = resp;
             },
             5 => {
@@ -208,8 +219,10 @@ fn fuzzNode(allocator: std.mem.Allocator, rng: std.Random) !void {
                 // Force-step to a specific role for more coverage
                 if (rng.boolean()) {
                     node.role = .follower;
+                    node.current_leader = null;
                 } else if (rng.boolean()) {
                     node.role = .leader;
+                    node.current_leader = node.config.id;
                     node.current_term = @max(node.current_term, 1);
                     _ = node.log.append(node.current_term, "force-leader-data") catch {};
                 }

@@ -215,7 +215,7 @@ fn sendSnap(peer: u64, req: rpc.InstallSnapshotRequest) void {
 // Simulation engine.
 // ---------------------------------------------------------------------------
 
-fn runSim(allocator: std.mem.Allocator, n_nodes: u64, seed: u64, max_steps: u64, fault_prob: u8) !void {
+fn runSim(allocator: std.mem.Allocator, n_nodes: u64, seed: u64, max_steps: u64, fault_prob: u8, dup_prob: u8, drop_prob: u8, snapshot_interval: u64) !void {
     // --- Init ---
     var all_ids = try allocator.alloc(u64, n_nodes - 1);
     defer allocator.free(all_ids);
@@ -293,8 +293,12 @@ fn runSim(allocator: std.mem.Allocator, n_nodes: u64, seed: u64, max_steps: u64,
             const m = ctx.messages.items[mi];
             if (m.deliver_at > now) { mi += 1; continue; }
 
-            // Check partition: if partitions set, only deliver within same group
+            // Check partition / drop: if partitions set, only deliver within same group;
+            // with drop_prob, randomly drop messages.
             const deliver = blk: {
+                if (drop_prob > 0 and ctx.rng.random().intRangeAtMost(u8, 0, 255) < drop_prob) {
+                    break :blk false;
+                }
                 if (ctx.partitions) |parts| {
                     const from_grp = partitionGroup(parts, m.from);
                     const to_grp = partitionGroup(parts, m.to);
@@ -307,6 +311,11 @@ fn runSim(allocator: std.mem.Allocator, n_nodes: u64, seed: u64, max_steps: u64,
                 const to_idx: usize = @intCast(m.to - 1);
                 if (to_idx < nodes.len) {
                     deliverMessage(&nodes[to_idx], m) catch {};
+
+                    // Duplicate delivery: re-enqueue a copy with a small extra delay.
+                    if (dup_prob > 0 and ctx.rng.random().intRangeAtMost(u8, 0, 255) < dup_prob) {
+                        try duplicateMessage(allocator, &ctx.messages, m, ctx.clock + ctx.rng.random().intRangeAtMost(u64, 1, 5_000_000));
+                    }
                 }
             }
 
@@ -334,6 +343,16 @@ fn runSim(allocator: std.mem.Allocator, n_nodes: u64, seed: u64, max_steps: u64,
             }
         }
 
+        // Snapshot injection: force the leader to compact its log periodically.
+        if (snapshot_interval > 0 and step % snapshot_interval == 0) {
+            for (nodes) |*ns| {
+                if (ns.node.role == .leader and ns.node.commitIndex() > ns.node.snapshot_index + 1) {
+                    ns.node.last_applied = ns.node.commitIndex();
+                    _ = ns.node.takeSnapshot() catch {};
+                }
+            }
+        }
+
         // Check invariants every 50 steps
         if (step % 50 == 0) {
             try checkInvariants(nodes);
@@ -349,6 +368,92 @@ fn partitionGroup(partitions: []const []const u64, server: u64) ?u64 {
         for (group) |s| if (s == server) return @intCast(gi);
     }
     return null;
+}
+
+/// Create a deep copy of a queued message and schedule it for later delivery.
+fn duplicateMessage(allocator: std.mem.Allocator, messages: *std.ArrayListUnmanaged(SimContext.Message), m: SimContext.Message, deliver_at: u64) !void {
+    var copy = SimContext.Message{
+        .tag = m.tag,
+        .from = m.from,
+        .to = m.to,
+        .deliver_at = deliver_at,
+    };
+    switch (m.tag) {
+        .ae_req => {
+            const r = m.ae_req.?;
+            var entries = std.ArrayListUnmanaged(rpc.LogEntryWire).empty;
+            errdefer entries.deinit(allocator);
+            for (r.entries.items) |e| {
+                const data_copy = if (e.data.len > 0) try allocator.dupe(u8, e.data) else &.{};
+                errdefer if (data_copy.len > 0) allocator.free(data_copy);
+                try entries.append(allocator, .{ .term = e.term, .index = e.index, .entry_type = e.entry_type, .data = data_copy });
+            }
+            const config_copy = if (r.leader_config.len > 0) try allocator.dupe(u8, r.leader_config) else &.{};
+            errdefer if (config_copy.len > 0) allocator.free(config_copy);
+            copy.ae_req = .{
+                .term = r.term,
+                .leader_id = r.leader_id,
+                .prev_log_index = r.prev_log_index,
+                .prev_log_term = r.prev_log_term,
+                .entries = entries,
+                .leader_commit = r.leader_commit,
+                .leader_config = config_copy,
+                .leader_config_index = r.leader_config_index,
+            };
+        },
+        .ae_resp => copy.ae_resp = m.ae_resp.?,
+        .rv_req => copy.rv_req = m.rv_req.?,
+        .rv_resp => copy.rv_resp = m.rv_resp.?,
+        .pv_req => copy.pv_req = m.pv_req.?,
+        .pv_resp => copy.pv_resp = m.pv_resp.?,
+        .snap_req => {
+            const r = m.snap_req.?;
+            const data_copy = if (r.data.len > 0) try allocator.dupe(u8, r.data) else &.{};
+            errdefer if (data_copy.len > 0) allocator.free(data_copy);
+            copy.snap_req = .{
+                .term = r.term,
+                .leader_id = r.leader_id,
+                .last_included_index = r.last_included_index,
+                .last_included_term = r.last_included_term,
+                .offset = r.offset,
+                .data = data_copy,
+                .done = r.done,
+            };
+        },
+        .snap_resp => copy.snap_resp = m.snap_resp.?,
+    }
+    try messages.append(allocator, copy);
+}
+
+fn restartNode(allocator: std.mem.Allocator, ns: *SimContext.NodeState, rng_seed: u64) !void {
+    const id = ns.node.config.id;
+    const peers = try allocator.dupe(u64, ns.node.config.peers);
+    defer allocator.free(peers);
+    const election_timeout_min_ns = ns.node.config.election_timeout_min_ns;
+    const election_timeout_max_ns = ns.node.config.election_timeout_max_ns;
+    const heartbeat_interval_ns = ns.node.config.heartbeat_interval_ns;
+
+    ns.node.deinit();
+    ns.log.deinit();
+    ns.sm.deinit();
+
+    ns.log = try LogType.init(allocator, &ns.mstore, 16);
+    ns.sm = SimSM{ .allocator = allocator };
+    const sm_iface = StateMachine(SimSM).init(&ns.sm);
+    const st = ns.mstore.toStorage();
+
+    ns.node = try NodeType.init(allocator, .{
+        .id = id,
+        .peers = peers,
+        .election_timeout_min_ns = election_timeout_min_ns,
+        .election_timeout_max_ns = election_timeout_max_ns,
+        .heartbeat_interval_ns = heartbeat_interval_ns,
+    }, &ns.log, sm_iface, st, rng_seed);
+
+    ns.node.send_append_entries = sendAe;
+    ns.node.send_request_vote = sendRv;
+    ns.node.send_pre_vote = sendPv;
+    ns.node.send_install_snapshot = sendSnap;
 }
 
 fn deliverMessage(ns: *SimContext.NodeState, m: SimContext.Message) !void {
@@ -420,7 +525,7 @@ fn deliverMessage(ns: *SimContext.NodeState, m: SimContext.Message) !void {
                 .offset = r.offset,
                 .data = r.data,
                 .done = r.done,
-            });
+            }, g_ctx.?.clock);
             const delay = g_ctx.?.rng.random().intRangeAtMost(u64, 1, 10_000_000);
             g_ctx.?.messages.append(g_ctx.?.allocator, .{
                 .tag = .snap_resp,
@@ -530,23 +635,61 @@ fn checkInvariants(nodes: []SimContext.NodeState) !void {
 // ---------------------------------------------------------------------------
 
 test "sim: 1 node no faults" {
-    try runSim(std.heap.page_allocator, 1, 0xCAFE, 200, 0);
+    try runSim(std.heap.page_allocator, 1, 0xCAFE, 200, 0, 0, 0, 0);
 }
 
 test "sim: 3 nodes no faults" {
-    try runSim(std.heap.page_allocator, 3, 0xBEEF, 500, 0);
+    try runSim(std.heap.page_allocator, 3, 0xBEEF, 500, 0, 0, 0, 0);
 }
 
 test "sim: 3 nodes with faults" {
-    try runSim(std.heap.page_allocator, 3, 0x1234, 800, 2);
+    try runSim(std.heap.page_allocator, 3, 0x1234, 800, 2, 0, 0, 0);
 }
 
 test "sim: 5 nodes no faults" {
-    try runSim(std.heap.page_allocator, 5, 0x5678, 500, 0);
+    try runSim(std.heap.page_allocator, 5, 0x5678, 500, 0, 0, 0, 0);
 }
 
 test "sim: 5 nodes with faults" {
-    try runSim(std.heap.page_allocator, 5, 0x9ABC, 800, 3);
+    try runSim(std.heap.page_allocator, 5, 0x9ABC, 800, 3, 0, 0, 0);
+}
+
+test "sim: 3 nodes with duplicate delivery" {
+    try runSim(std.heap.page_allocator, 3, 0xD00D, 500, 0, 64, 0, 0);
+}
+
+test "sim: 3 nodes with message drops" {
+    try runSim(std.heap.page_allocator, 3, 0xD00F, 800, 0, 0, 32, 0);
+}
+
+test "sim: 3 nodes with duplicates and drops" {
+    try runSim(std.heap.page_allocator, 3, 0xD11D, 1000, 0, 48, 24, 0);
+}
+
+test "sim: 3 nodes with leader snapshots" {
+    try runSim(std.heap.page_allocator, 3, 0x5A71, 1200, 0, 0, 0, 50);
+}
+
+test "restart single node in isolation" {
+    const allocator = std.testing.allocator;
+    var mstore = mem_storage.MemoryStorage.init(allocator);
+    var log = try LogType.init(allocator, &mstore, 16);
+    var sm = SimSM{ .allocator = allocator };
+    const sm_iface = StateMachine(SimSM).init(&sm);
+    const node = try NodeType.init(allocator, .{
+        .id = 1,
+        .peers = &.{ 2, 3 },
+        .election_timeout_min_ns = 100_000_000,
+        .election_timeout_max_ns = 200_000_000,
+        .heartbeat_interval_ns = 40_000_000,
+    }, &log, sm_iface, mstore.toStorage(), 12345);
+
+    var ns = SimContext.NodeState{ .mstore = mstore, .log = log, .sm = sm, .node = node };
+    try restartNode(allocator, &ns, 67890);
+    ns.node.deinit();
+    ns.log.deinit();
+    ns.sm.deinit();
+    ns.mstore.deinit();
 }
 
 // ===========================================================================

@@ -65,22 +65,21 @@ pub fn Log(comptime ST: type) type {
             self.* = undefined;
         }
 
-        /// Last entry index (0 if empty).
-        /// After snapshot compaction, returns the sentinel's stored index.
-        pub fn lastIndex(self: *const Self) types.LogIndex {
-            if (self.len <= 1) return self.entries[0].index;
-            return @as(types.LogIndex, @intCast(self.len - 1));
+        /// Raft index stored at array slot 0 (the compacted base).
+        pub fn baseIndex(self: *const Self) types.LogIndex {
+            return self.entries[0].index;
         }
 
-        /// Term at a given index. Returns 0 for index 0 or out-of-range.
+        /// Last entry index (0 if empty, or the sentinel's stored index after compaction).
+        pub fn lastIndex(self: *const Self) types.LogIndex {
+            return self.entries[self.len - 1].index;
+        }
+
+        /// Term at a given index. Returns 0 for indices below the base or out of range.
         pub fn termAt(self: *const Self, index: types.LogIndex) types.Term {
-            if (index >= self.len) {
-                // After compaction, only the sentinel entry exists.
-                // Any index <= sentinel.index returns the sentinel's term.
-                if (self.len == 1 and index <= self.entries[0].index) return self.entries[0].term;
-                return 0;
-            }
-            return self.entries[@as(usize, @intCast(index))].term;
+            const base = self.baseIndex();
+            if (index < base or index > self.lastIndex()) return 0;
+            return self.entries[@as(usize, @intCast(index - base))].term;
         }
 
         /// Append a new command entry. Writes to storage, then caches in memory.
@@ -116,27 +115,37 @@ pub fn Log(comptime ST: type) type {
 
         /// Get a slice of entries from `start` (inclusive) to the end.
         pub fn sliceFrom(self: *const Self, start: types.LogIndex) []const LogEntry {
-            if (start >= self.len) return &.{};
-            return self.entries[@as(usize, @intCast(start))..self.len];
+            const base = self.baseIndex();
+            if (start > self.lastIndex()) return &.{};
+            const pos = if (start <= base) 0 else @as(usize, @intCast(start - base));
+            return self.entries[pos..self.len];
         }
 
-        /// Get a single entry. Returns null for index 0 or out-of-range.
+        /// Get a single entry. Returns null for index 0 or out-of-range (including compacted indices).
         pub fn get(self: *const Self, index: types.LogIndex) ?*const LogEntry {
-            if (index == 0 or index >= self.len) return null;
-            return &self.entries[@as(usize, @intCast(index))];
+            const base = self.baseIndex();
+            if (index == 0 or index < base or index > self.lastIndex()) return null;
+            return &self.entries[@as(usize, @intCast(index - base))];
         }
 
         /// Truncate all entries strictly after `last_kept`.
         /// Frees data for removed entries and compacts storage.
         pub fn truncate(self: *Self, last_kept: types.LogIndex) !void {
-            const keep = @as(usize, @intCast(last_kept)) + 1;
+            const base = self.baseIndex();
+            if (last_kept < base) {
+                // Cannot truncate below the compacted base; truncate only to the base.
+                try self.truncate(base);
+                return;
+            }
+
+            const keep = @as(usize, @intCast(last_kept - base)) + 1;
             if (keep >= self.len) return;
 
             // Free in-memory entries being removed
             for (self.entries[keep..self.len]) |*e| {
                 if (e.data.len > 0) e.deinit(self.allocator);
             }
-            self.len = @max(keep, 1); // always keep sentinel
+            self.len = keep; // always keeps the sentinel at position 0
 
             // Compact storage
             try self.storage.truncateLog(last_kept);
@@ -152,8 +161,8 @@ pub fn Log(comptime ST: type) type {
             self.entries[0] = LogEntry{ .term = last_included_term, .index = last_included_index, .entry_type = .command, .data = &.{} };
             self.len = 1;
 
-            // Persist snapshot marker to storage
-            try self.storage.truncateLog(last_included_index);
+            // Persist snapshot marker to storage: drop the compacted prefix.
+            try self.storage.dropLogPrefix(last_included_index);
         }
 
         fn grow(self: *Self) !void {
@@ -164,28 +173,45 @@ pub fn Log(comptime ST: type) type {
         }
 
         fn loadFromStorage(self: *Self) !void {
-            const last_idx = self.storage.loadLastLogIndex();
-            if (last_idx == 0) return;
+            const snap_index = self.storage.loadLastSnapshotIndex();
+            const snap_term = self.storage.loadLastSnapshotTerm();
 
-            // Ensure capacity for all entries
-            const needed = @as(usize, @intCast(last_idx)) + 1;
+            // Use snapshot metadata as the compacted base if a snapshot exists.
+            if (snap_index > 0) {
+                if (self.entries[0].data.len > 0) self.allocator.free(self.entries[0].data);
+                self.entries[0] = LogEntry{ .term = snap_term, .index = snap_index, .entry_type = .command, .data = &.{} };
+            }
+
+            const base = self.baseIndex();
+            const last_idx = self.storage.loadLastLogIndex();
+            if (last_idx <= base) return;
+
+            // Ensure capacity for entries after the base.
+            const count_after_base = last_idx - base;
+            const needed = @as(usize, @intCast(count_after_base)) + 1;
             if (needed > self.capacity) {
                 self.entries = try self.allocator.realloc(self.entries, needed);
                 self.capacity = needed;
             }
 
-            // Load each entry
-            var i: types.LogIndex = 1;
+            // Load entries strictly after the base, stopping at the first gap.
+            var i: types.LogIndex = base + 1;
             while (i <= last_idx) : (i += 1) {
                 const owned = self.storage.loadLogEntry(i, self.allocator);
                 if (owned) |entry| {
-                    self.entries[@as(usize, @intCast(i))] = LogEntry{
+                    if (entry.index != i) {
+                        var to_free = entry;
+                        to_free.deinit(self.allocator);
+                        break;
+                    }
+                    const pos = @as(usize, @intCast(i - base));
+                    self.entries[pos] = LogEntry{
                         .term = entry.term,
                         .index = entry.index,
                         .entry_type = entry.entry_type,
                         .data = entry.data,
                     };
-                    self.len = @as(usize, @intCast(i)) + 1;
+                    self.len = pos + 1;
                 } else {
                     // GAP in the log — stop loading
                     break;
