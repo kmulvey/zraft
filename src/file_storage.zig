@@ -8,8 +8,9 @@
 //!     snapshot.bin   — snapshot: last_included_index (u64) + last_included_term (u64) + data_len (u64) + data
 
 const std = @import("std");
-const fs = std.fs;
 const mem = std.mem;
+const posix = std.posix;
+const linux = std.os.linux;
 const types = @import("types.zig");
 const storage = @import("storage.zig");
 
@@ -21,9 +22,32 @@ const SnapshotData = storage.SnapshotData;
 
 const NULL_VOTED_FOR: u64 = 0xFFFF_FFFF_FFFF_FFFF;
 
+/// Check a linux syscall return: 0 = success, negative = errno.
+fn checkSyscall(ret: usize) !void {
+    const signed = -@as(i32, @intCast(ret));
+    if (signed >= 0) return;
+    return posix.unexpectedErrno(posix.errno(signed));
+}
+
+/// Wrapper around linux.pread that returns the bytes read or a Zig error.
+fn preadAll(fd: posix.fd_t, buf: []u8, offset: i64) !usize {
+    const ret = linux.pread(fd, buf.ptr, buf.len, offset);
+    const signed = -@as(i32, @intCast(ret));
+    if (signed < 0) return posix.unexpectedErrno(posix.errno(signed));
+    return ret;
+}
+
+/// Wrapper around linux.write that returns the bytes written or a Zig error.
+fn writeAll(fd: posix.fd_t, buf: []const u8) !usize {
+    const ret = linux.write(fd, buf.ptr, buf.len);
+    const signed = -@as(i32, @intCast(ret));
+    if (signed < 0) return posix.unexpectedErrno(posix.errno(signed));
+    return ret;
+}
+
 pub const FileStorage = struct {
     allocator: std.mem.Allocator,
-    dir: fs.Dir,
+    dir_fd: posix.fd_t,
     server_id: ServerId,
     current_term: Term,
     voted_for: ?ServerId,
@@ -34,20 +58,24 @@ pub const FileStorage = struct {
 
     pub fn init(allocator: std.mem.Allocator, base_dir: []const u8, server_id: ServerId, max_wal_bytes: usize) !Self {
         var buf: [256]u8 = undefined;
-        const dirname = std.fmt.bufPrint(&buf, "raft-{}", .{server_id}) catch "raft";
-        fs.cwd().makePath(base_dir) catch {};
-        const base = try fs.cwd().openDir(base_dir, .{});
-        errdefer base.close();
-        base.makeDir(dirname) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => |e| return e,
-        };
-        const dir = try base.openDir(dirname, .{});
-        errdefer dir.close();
+        const dirname = try std.fmt.bufPrintZ(&buf, "raft-{}", .{server_id});
+
+        // Create base directory if needed.
+        var bbuf: [256]u8 = undefined;
+        const zbase = try std.fmt.bufPrintZ(&bbuf, "{s}", .{base_dir});
+        _ = linux.mkdirat(posix.AT.FDCWD, zbase, 0o755);
+        const base_fd = try posix.openat(posix.AT.FDCWD, base_dir, posix.O{ .DIRECTORY = true, .CLOEXEC = true }, 0);
+        errdefer _ = linux.close(base_fd);
+
+        // Create the raft-<id> subdirectory inside base_dir.
+        _ = linux.mkdirat(base_fd, dirname, 0o755);
+        const dir_fd = try posix.openat(base_fd, dirname, posix.O{ .DIRECTORY = true, .CLOEXEC = true }, 0);
+        errdefer _ = linux.close(dir_fd);
+        _ = linux.close(base_fd);
 
         var self = Self{
             .allocator = allocator,
-            .dir = dir,
+            .dir_fd = dir_fd,
             .server_id = server_id,
             .current_term = 0,
             .voted_for = null,
@@ -59,7 +87,10 @@ pub const FileStorage = struct {
         return self;
     }
 
-    pub fn deinit(self: *Self) void { self.dir.close(); self.* = undefined; }
+    pub fn deinit(self: *Self) void {
+        _ = linux.close(self.dir_fd);
+        self.* = undefined;
+    }
 
     // ------------------------------------------------------------------
     // Public interface
@@ -85,68 +116,65 @@ pub const FileStorage = struct {
         ptr.last_log_index = last_kept_index;
     }
 
-    pub fn sync(ptr: *Self) !void { try ptr.dir.sync(); }
+    pub fn sync(ptr: *Self) !void {
+        try checkSyscall(linux.fsync(ptr.dir_fd));
+    }
 
     // ------------------------------------------------------------------
     // Snapshot
     // ------------------------------------------------------------------
 
     pub fn storeSnapshot(ptr: *Self, last_included_index: LogIndex, last_included_term: Term, data: []const u8) !void {
-        var buf: [256]u8 = undefined;
-        const path = try std.fmt.bufPrint(&buf, "snapshot.bin", .{});
-        const tmp_path = try std.fmt.bufPrint(&buf, "snapshot.tmp", .{});
-
-        const tmp_file = try ptr.dir.createFile(tmp_path, .{ .truncate = true });
-        defer tmp_file.close();
+        const tmp_file = try posix.openat(ptr.dir_fd, "snapshot.tmp", posix.O{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o644);
+        defer _ = linux.close(tmp_file);
 
         var header: [24]u8 = undefined;
         mem.writeInt(u64, header[0..8], last_included_index, .little);
         mem.writeInt(u64, header[8..16], last_included_term, .little);
         mem.writeInt(u64, header[16..24], @as(u64, @intCast(data.len)), .little);
-        try tmp_file.writeAll(&header);
-        if (data.len > 0) try tmp_file.writeAll(data);
-        try tmp_file.sync();
-        try ptr.dir.rename(tmp_path, path);
+
+        _ = try writeAll(tmp_file, &header);
+        if (data.len > 0) _ = try writeAll(tmp_file, data);
+
+        try checkSyscall(linux.fsync(tmp_file));
+        try checkSyscall(linux.renameat(ptr.dir_fd, "snapshot.tmp", ptr.dir_fd, "snapshot.bin"));
     }
 
     pub fn loadSnapshot(ptr: *Self, allocator: std.mem.Allocator) ?SnapshotData {
-        var buf: [256]u8 = undefined;
-        const path = std.fmt.bufPrint(&buf, "snapshot.bin", .{}) catch return null;
-        const file = ptr.dir.openFile(path, .{}) catch return null;
-        defer file.close();
+        const file = posix.openat(ptr.dir_fd, "snapshot.bin", posix.O{ .CLOEXEC = true }, 0) catch return null;
+        defer _ = linux.close(file);
 
         var header: [24]u8 = undefined;
-        const n = file.readAll(&header) catch return null;
+        const n = posix.read(file, &header) catch return null;
         if (n < 24) return null;
 
         const last_index = mem.readInt(u64, header[0..8], .little);
         const last_term = mem.readInt(u64, header[8..16], .little);
         const data_len: usize = @intCast(mem.readInt(u64, header[16..24], .little));
 
-        const data = if (data_len > 0) allocator.alloc(u8, data_len) catch return null else &.{};
+        const data = if (data_len > 0) allocator.alloc(u8, data_len) catch return null else @as([]u8, &.{});
         if (data_len > 0) {
-            file.readAll(data) catch { if (data.len > 0) allocator.free(data); return null; };
+            _ = posix.read(file, data) catch {
+                if (data.len > 0) allocator.free(data);
+                return null;
+            };
         }
         return SnapshotData{ .last_included_index = last_index, .last_included_term = last_term, .data = data };
     }
 
     pub fn loadLastSnapshotIndex(ptr: *Self) LogIndex {
-        var buf: [256]u8 = undefined;
-        const path = std.fmt.bufPrint(&buf, "snapshot.bin", .{}) catch return 0;
-        const file = ptr.dir.openFile(path, .{}) catch return 0;
-        defer file.close();
+        const file = posix.openat(ptr.dir_fd, "snapshot.bin", posix.O{ .CLOEXEC = true }, 0) catch return 0;
+        defer _ = linux.close(file);
         var header: [8]u8 = undefined;
-        if ((file.readAll(&header) catch 0) < 8) return 0;
+        if ((posix.read(file, &header) catch 0) < 8) return 0;
         return mem.readInt(u64, &header, .little);
     }
 
     pub fn loadLastSnapshotTerm(ptr: *Self) Term {
-        var buf: [256]u8 = undefined;
-        const path = std.fmt.bufPrint(&buf, "snapshot.bin", .{}) catch return 0;
-        const file = ptr.dir.openFile(path, .{}) catch return 0;
-        defer file.close();
+        const file = posix.openat(ptr.dir_fd, "snapshot.bin", posix.O{ .CLOEXEC = true }, 0) catch return 0;
+        defer _ = linux.close(file);
         var header: [16]u8 = undefined;
-        if ((file.readAll(&header) catch 0) < 16) return 0;
+        if ((posix.read(file, &header) catch 0) < 16) return 0;
         return mem.readInt(u64, header[8..16], .little);
     }
 
@@ -155,27 +183,23 @@ pub const FileStorage = struct {
     // ------------------------------------------------------------------
 
     fn writeMetadata(self: *Self) !void {
-        var path_buf: [256]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, "metadata.bin", .{});
-        var file = try self.dir.createFile(path, .{ .truncate = true });
-        defer file.close();
+        const file = try posix.openat(self.dir_fd, "metadata.bin", posix.O{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o644);
+        defer _ = linux.close(file);
         var data: [16]u8 = undefined;
         mem.writeInt(u64, data[0..8], self.current_term, .little);
         mem.writeInt(u64, data[8..16], self.voted_for orelse NULL_VOTED_FOR, .little);
-        try file.writeAll(&data);
-        try file.sync();
+        _ = try writeAll(file, &data);
+        try checkSyscall(linux.fsync(file));
     }
 
     fn loadMetadata(self: *Self) !void {
-        var path_buf: [256]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, "metadata.bin", .{});
-        const file = self.dir.openFile(path, .{}) catch |err| switch (err) {
+        const file = posix.openat(self.dir_fd, "metadata.bin", posix.O{ .CLOEXEC = true }, 0) catch |err| switch (err) {
             error.FileNotFound => return,
             else => |e| return e,
         };
-        defer file.close();
+        defer _ = linux.close(file);
         var data: [16]u8 = undefined;
-        if ((try file.readAll(&data)) < 16) return;
+        if ((try posix.read(file, &data)) < 16) return;
         self.current_term = mem.readInt(u64, data[0..8], .little);
         const vf = mem.readInt(u64, data[8..16], .little);
         self.voted_for = if (vf == NULL_VOTED_FOR) null else vf;
@@ -186,40 +210,53 @@ pub const FileStorage = struct {
     // ------------------------------------------------------------------
 
     fn writeEntry(self: *Self, entry: *const LogEntryOwned) !void {
-        var path_buf: [256]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, "wal.bin", .{});
-        const file = try self.dir.createFile(path, .{ .truncate = false });
-        defer file.close();
-        try file.seekFromEnd(0);
+        const file = try posix.openat(self.dir_fd, "wal.bin", posix.O{ .ACCMODE = .WRONLY, .CREAT = true, .CLOEXEC = true }, 0o644);
+        defer _ = linux.close(file);
+
+        // Seek to end for append.
+        const seek_ret = linux.lseek(file, 0, @intCast(posix.SEEK.END));
+        if (@as(i64, @bitCast(seek_ret)) < 0) {
+            return posix.unexpectedErrno(posix.errno(-@as(i32, @intCast(seek_ret))));
+        }
+
         var header: [21]u8 = undefined;
         mem.writeInt(u64, header[0..8], entry.index, .little);
         mem.writeInt(u64, header[8..16], entry.term, .little);
         header[16] = @intFromEnum(entry.entry_type);
         mem.writeInt(u32, header[17..21], @as(u32, @intCast(entry.data.len)), .little);
-        try file.writeAll(&header);
-        if (entry.data.len > 0) try file.writeAll(entry.data);
-        try file.sync();
+        _ = try writeAll(file, &header);
+        if (entry.data.len > 0) _ = try writeAll(file, entry.data);
+
+        try checkSyscall(linux.fsync(file));
     }
 
     fn readEntry(self: *Self, index: LogIndex, allocator: std.mem.Allocator) !?LogEntryOwned {
-        var path_buf: [256]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, "wal.bin", .{});
-        const file = try self.dir.openFile(path, .{});
-        defer file.close();
+        const file = posix.openat(self.dir_fd, "wal.bin", posix.O{ .CLOEXEC = true }, 0) catch |err| switch (err) {
+            error.FileNotFound => return null,
+            else => |e| return e,
+        };
+        defer _ = linux.close(file);
 
-        const file_size = try file.getEndPos();
+        // Get file size.
+        const file_size = blk: {
+            const sz = linux.lseek(file, 0, @intCast(posix.SEEK.END));
+            if (@as(i64, @bitCast(sz)) < 0) return null;
+            break :blk @as(u64, @intCast(sz));
+        };
+
         var pos: u64 = 0;
         while (pos < file_size) {
             var header: [21]u8 = undefined;
-            if ((try file.preadAll(&header, pos)) < 21) return null;
+            const n = try preadAll(file, &header, @intCast(pos));
+            if (n < 21) return null;
             const entry_index = mem.readInt(u64, header[0..8], .little);
             const entry_term = mem.readInt(u64, header[8..16], .little);
             const entry_type: types.EntryType = @enumFromInt(header[16]);
             const data_len: usize = @intCast(mem.readInt(u32, header[17..21], .little));
 
             if (entry_index == index) {
-                const data = if (data_len > 0) try allocator.alloc(u8, data_len) else &.{};
-                if (data_len > 0) _ = try file.preadAll(data, pos + 21);
+                const data = if (data_len > 0) try allocator.alloc(u8, data_len) else @as([]u8, &.{});
+                if (data_len > 0) _ = try preadAll(file, data, @intCast(pos + 21));
                 return LogEntryOwned{ .term = entry_term, .index = entry_index, .entry_type = entry_type, .data = data };
             }
             pos += 21 + data_len;
@@ -228,19 +265,24 @@ pub const FileStorage = struct {
     }
 
     fn rebuildLastLogIndex(self: *Self) !void {
-        var path_buf: [256]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, "wal.bin", .{});
-        const file = self.dir.openFile(path, .{}) catch |err| switch (err) {
+        const file = posix.openat(self.dir_fd, "wal.bin", posix.O{ .CLOEXEC = true }, 0) catch |err| switch (err) {
             error.FileNotFound => return,
             else => |e| return e,
         };
-        defer file.close();
+        defer _ = linux.close(file);
 
-        const file_size = try file.getEndPos();
+        // Get file size.
+        const file_size = blk: {
+            const sz = linux.lseek(file, 0, @intCast(posix.SEEK.END));
+            if (@as(i64, @bitCast(sz)) < 0) return;
+            break :blk @as(u64, @intCast(sz));
+        };
+
         var pos: u64 = 0;
         while (pos < file_size) {
             var header: [21]u8 = undefined;
-            if ((try file.preadAll(&header, pos)) < 21) break;
+            const n = preadAll(file, &header, @intCast(pos)) catch break;
+            if (n < 21) break;
             const entry_index = mem.readInt(u64, header[0..8], .little);
             const data_len: usize = @intCast(mem.readInt(u32, header[17..21], .little));
             self.last_log_index = @max(self.last_log_index, entry_index);
@@ -253,57 +295,56 @@ pub const FileStorage = struct {
     // ------------------------------------------------------------------
 
     fn compactWal(self: *Self, last_kept_index: LogIndex) !void {
-        var path_buf: [256]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, "wal.bin", .{});
-
-        // Open source and temp files simultaneously.
-        const src_file = self.dir.openFile(path, .{}) catch |err| switch (err) {
+        const src_file = posix.openat(self.dir_fd, "wal.bin", posix.O{ .CLOEXEC = true }, 0) catch |err| switch (err) {
             error.FileNotFound => return,
             else => |e| return e,
         };
-        defer src_file.close();
+        defer _ = linux.close(src_file);
 
-        const tmp_path = try std.fmt.bufPrint(&path_buf, "wal.tmp", .{});
-        const tmp_file = try self.dir.createFile(tmp_path, .{ .truncate = true });
-        defer tmp_file.close();
+        // Get source file size.
+        const file_size = blk: {
+            const sz = linux.lseek(src_file, 0, @intCast(posix.SEEK.END));
+            if (@as(i64, @bitCast(sz)) < 0) return;
+            break :blk @as(u64, @intCast(sz));
+        };
+
+        // Create temp file.
+        const tmp_file = try posix.openat(self.dir_fd, "wal.tmp", posix.O{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o644);
+        defer _ = linux.close(tmp_file);
 
         // Stream entries: read from source, write matching ones to temp.
-        const file_size = try src_file.getEndPos();
         var pos: u64 = 0;
         var highest_kept_index: LogIndex = 0;
         while (pos < file_size) {
             var header: [21]u8 = undefined;
-            if ((try src_file.preadAll(&header, pos)) < 21) break;
+            const n = preadAll(src_file, &header, @intCast(pos)) catch break;
+            if (n < 21) break;
             const entry_index = mem.readInt(u64, header[0..8], .little);
             const entry_term = mem.readInt(u64, header[8..16], .little);
             const entry_type: types.EntryType = @enumFromInt(header[16]);
             const data_len: usize = @intCast(mem.readInt(u32, header[17..21], .little));
 
             if (entry_index <= last_kept_index) {
-                // Read entry data, write to temp, then free.
-                const data = if (data_len > 0) try self.allocator.alloc(u8, data_len) else &.{};
+                const data = if (data_len > 0) try self.allocator.alloc(u8, data_len) else @as([]u8, &.{});
                 defer if (data.len > 0) self.allocator.free(data);
-                if (data_len > 0) _ = try src_file.preadAll(data, pos + 21);
+                if (data_len > 0) _ = try preadAll(src_file, data, @intCast(pos + 21));
 
                 var hdr: [21]u8 = undefined;
                 mem.writeInt(u64, hdr[0..8], entry_index, .little);
                 mem.writeInt(u64, hdr[8..16], entry_term, .little);
                 hdr[16] = @intFromEnum(entry_type);
                 mem.writeInt(u32, hdr[17..21], @as(u32, @intCast(data_len)), .little);
-                try tmp_file.writeAll(&hdr);
-                if (data.len > 0) try tmp_file.writeAll(data);
+                _ = try writeAll(tmp_file, &hdr);
+                if (data.len > 0) _ = try writeAll(tmp_file, data);
 
                 highest_kept_index = entry_index;
             }
             pos += 21 + data_len;
         }
 
-        try tmp_file.sync();
+        try checkSyscall(linux.fsync(tmp_file));
+        try checkSyscall(linux.renameat(self.dir_fd, "wal.tmp", self.dir_fd, "wal.bin"));
 
-        // Atomically replace old WAL with compacted one.
-        try self.dir.rename("wal.tmp", path);
-
-        // Update last_log_index to the highest kept entry.
         self.last_log_index = highest_kept_index;
     }
 
@@ -331,9 +372,9 @@ pub const FileStorage = struct {
 test "FileStorage init creates directories and files" {
     const allocator = std.testing.allocator;
     const test_dir = "tmp-test-filestorage";
-    fs.cwd().deleteTree(test_dir) catch {};
+    std.fs.deleteTreeAbsolute(test_dir) catch {};
     var st = try FileStorage.init(allocator, test_dir, 1, 1024 * 1024);
-    defer { st.deinit(); fs.cwd().deleteTree(test_dir) catch {}; }
+    defer { st.deinit(); std.fs.deleteTreeAbsolute(test_dir) catch {}; }
     try std.testing.expectEqual(@as(Term, 0), st.loadTerm());
     try std.testing.expectEqual(@as(?ServerId, null), st.loadVotedFor());
     try std.testing.expectEqual(@as(LogIndex, 0), st.loadLastLogIndex());
@@ -342,7 +383,7 @@ test "FileStorage init creates directories and files" {
 test "FileStorage round-trip term and votedFor" {
     const allocator = std.testing.allocator;
     const test_dir = "tmp-test-filestorage2";
-    fs.cwd().deleteTree(test_dir) catch {};
+    std.fs.deleteTreeAbsolute(test_dir) catch {};
     {
         var st = try FileStorage.init(allocator, test_dir, 2, 1024 * 1024);
         defer st.deinit();
@@ -357,15 +398,15 @@ test "FileStorage round-trip term and votedFor" {
         try std.testing.expectEqual(@as(Term, 42), st.loadTerm());
         try std.testing.expectEqual(@as(?ServerId, 7), st.loadVotedFor());
     }
-    fs.cwd().deleteTree(test_dir) catch {};
+    std.fs.deleteTreeAbsolute(test_dir) catch {};
 }
 
 test "FileStorage append and read log entry" {
     const allocator = std.testing.allocator;
     const test_dir = "tmp-test-filestorage3";
-    fs.cwd().deleteTree(test_dir) catch {};
+    std.fs.deleteTreeAbsolute(test_dir) catch {};
     var st = try FileStorage.init(allocator, test_dir, 3, 1024 * 1024);
-    defer { st.deinit(); fs.cwd().deleteTree(test_dir) catch {}; }
+    defer { st.deinit(); std.fs.deleteTreeAbsolute(test_dir) catch {}; }
     const data = try allocator.dupe(u8, "hello-raft");
     defer allocator.free(data);
     try st.appendLogEntry(.{ .term = 1, .index = 1, .data = data });
