@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: Build & Test (Zig ${{ matrix.zig_version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        zig_version: ["0.16.0"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: ${{ matrix.zig_version }}
+
+      - name: Verify Zig version
+        run: zig version
+
+      - name: Build library
+        run: zig build
+
+      - name: Run all test suites
+        run: zig build test
+
+  lint:
+    name: zlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install zlint
+        run: |
+          curl -sSfL https://github.com/DonIsaac/zlint/releases/download/v0.9.1/zlint-linux-x86_64 -o /usr/local/bin/zlint
+          chmod +x /usr/local/bin/zlint
+          zlint --version
+
+      - name: Run zlint
+        run: zlint src/*.zig
