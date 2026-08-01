@@ -15,7 +15,7 @@ test "FileStorage init creates directories and files" {
     cleanTestDir(test_dir);
     defer cleanTestDir(test_dir);
 
-    var st = try FileStorage.init(allocator, test_dir, 1);
+    var st = try FileStorage.init(std.testing.io, allocator, test_dir, 1);
     defer st.deinit();
     try std.testing.expectEqual(@as(raft.Term, 0), st.loadTerm());
     try std.testing.expectEqual(@as(?raft.ServerId, null), st.loadVotedFor());
@@ -28,7 +28,7 @@ test "FileStorage round-trip term and votedFor" {
     cleanTestDir(test_dir);
     defer cleanTestDir(test_dir);
     {
-        var st = try FileStorage.init(allocator, test_dir, 2);
+        var st = try FileStorage.init(std.testing.io, allocator, test_dir, 2);
         defer st.deinit();
         try st.storeTerm(42);
         try st.storeVotedFor(7);
@@ -36,7 +36,7 @@ test "FileStorage round-trip term and votedFor" {
         try std.testing.expectEqual(@as(?raft.ServerId, 7), st.loadVotedFor());
     }
     {
-        var st = try FileStorage.init(allocator, test_dir, 2);
+        var st = try FileStorage.init(std.testing.io, allocator, test_dir, 2);
         defer st.deinit();
         try std.testing.expectEqual(@as(raft.Term, 42), st.loadTerm());
         try std.testing.expectEqual(@as(?raft.ServerId, 7), st.loadVotedFor());
@@ -49,7 +49,7 @@ test "FileStorage append and read log entry" {
     cleanTestDir(test_dir);
     defer cleanTestDir(test_dir);
 
-    var st = try FileStorage.init(allocator, test_dir, 3);
+    var st = try FileStorage.init(std.testing.io, allocator, test_dir, 3);
     defer st.deinit();
     const data = try allocator.dupe(u8, "hello-raft");
     defer allocator.free(data);
@@ -70,7 +70,7 @@ test "FileStorage tail truncate keeps prefix" {
     cleanTestDir(test_dir);
     defer cleanTestDir(test_dir);
 
-    var st = try FileStorage.init(allocator, test_dir, 4);
+    var st = try FileStorage.init(std.testing.io, allocator, test_dir, 4);
     defer st.deinit();
 
     try st.appendLogEntry(.{ .term = 1, .index = 1, .entry_type = .command, .data = "a" });
@@ -91,7 +91,7 @@ test "FileStorage prefix drop keeps suffix" {
     cleanTestDir(test_dir);
     defer cleanTestDir(test_dir);
 
-    var st = try FileStorage.init(allocator, test_dir, 5);
+    var st = try FileStorage.init(std.testing.io, allocator, test_dir, 5);
     defer st.deinit();
 
     try st.appendLogEntry(.{ .term = 1, .index = 1, .entry_type = .command, .data = "a" });
@@ -116,14 +116,14 @@ test "FileStorage snapshot round-trip and reload" {
     defer cleanTestDir(test_dir);
 
     {
-        var st = try FileStorage.init(allocator, test_dir, 6);
+        var st = try FileStorage.init(std.testing.io, allocator, test_dir, 6);
         defer st.deinit();
         try st.storeSnapshot(10, 2, "snap-data");
         try std.testing.expectEqual(@as(raft.LogIndex, 10), st.loadLastSnapshotIndex());
         try std.testing.expectEqual(@as(raft.Term, 2), st.loadLastSnapshotTerm());
     }
     {
-        var st = try FileStorage.init(allocator, test_dir, 6);
+        var st = try FileStorage.init(std.testing.io, allocator, test_dir, 6);
         defer st.deinit();
         try std.testing.expectEqual(@as(raft.LogIndex, 10), st.loadLastSnapshotIndex());
         try std.testing.expectEqual(@as(raft.Term, 2), st.loadLastSnapshotTerm());
@@ -142,13 +142,13 @@ test "FileStorage log reload after re-init" {
     defer cleanTestDir(test_dir);
 
     {
-        var st = try FileStorage.init(allocator, test_dir, 7);
+        var st = try FileStorage.init(std.testing.io, allocator, test_dir, 7);
         defer st.deinit();
         try st.appendLogEntry(.{ .term = 1, .index = 1, .entry_type = .command, .data = "x" });
         try st.appendLogEntry(.{ .term = 1, .index = 2, .entry_type = .command, .data = "y" });
     }
     {
-        var st = try FileStorage.init(allocator, test_dir, 7);
+        var st = try FileStorage.init(std.testing.io, allocator, test_dir, 7);
         defer st.deinit();
         try std.testing.expectEqual(@as(raft.LogIndex, 2), st.loadLastLogIndex());
         const e2 = st.loadLogEntry(2, allocator);
@@ -166,14 +166,14 @@ test "FileStorage prefix drop then reload starts after snapshot" {
     defer cleanTestDir(test_dir);
 
     {
-        var st = try FileStorage.init(allocator, test_dir, 8);
+        var st = try FileStorage.init(std.testing.io, allocator, test_dir, 8);
         defer st.deinit();
         try st.appendLogEntry(.{ .term = 1, .index = 1, .entry_type = .command, .data = "old" });
         try st.appendLogEntry(.{ .term = 2, .index = 2, .entry_type = .command, .data = "new" });
         try st.dropLogPrefix(1);
     }
     {
-        var st = try FileStorage.init(allocator, test_dir, 8);
+        var st = try FileStorage.init(std.testing.io, allocator, test_dir, 8);
         defer st.deinit();
         try std.testing.expect(st.loadLogEntry(1, allocator) == null);
         const e2 = st.loadLogEntry(2, allocator);

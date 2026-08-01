@@ -28,8 +28,7 @@ const WAL_ENTRY_HEADER_LEN: usize = 21;
 
 pub const FileStorage = struct {
     allocator: std.mem.Allocator,
-    /// The I/O engine that backs all file operations.
-    io_storage: Io.Threaded,
+    /// The I/O engine used for all file operations (provided by the caller).
     io: Io,
     /// The `raft-<id>` data directory.
     dir: Io.Dir,
@@ -44,11 +43,10 @@ pub const FileStorage = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, base_dir: []const u8, server_id: ServerId) !Self {
-        var io_storage = Io.Threaded.init(allocator, .{});
-        errdefer io_storage.deinit();
-        const io = io_storage.io();
-
+    /// `io` must outlive this FileStorage. Per the std.Io documentation,
+    /// library code should accept an `Io` parameter rather than creating its
+    /// own instance (which can deadlock when multiple instances coexist).
+    pub fn init(io: Io, allocator: std.mem.Allocator, base_dir: []const u8, server_id: ServerId) !Self {
         // Create <base_dir>/raft-<id> (mkdir -p style) and open it.
         var buf: [256]u8 = undefined;
         const dirname = try std.fmt.bufPrint(&buf, "{s}/raft-{}", .{ base_dir, server_id });
@@ -62,7 +60,6 @@ pub const FileStorage = struct {
 
         var self = Self{
             .allocator = allocator,
-            .io_storage = io_storage,
             .io = io,
             .dir = dir,
             .wal = wal,
@@ -80,7 +77,6 @@ pub const FileStorage = struct {
     pub fn deinit(self: *Self) void {
         self.wal.close(self.io);
         self.dir.close(self.io);
-        self.io_storage.deinit();
         self.* = undefined;
     }
 
