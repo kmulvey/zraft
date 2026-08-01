@@ -1,5 +1,9 @@
 //! File-backed persistent storage for Raft.
 //!
+//! Uses the cross-platform `std.Io` interface (Zig 0.16+), so it works on
+//! Linux, macOS, Windows, etc. (the previous raw `std.os.linux` syscall
+//! implementation crashed with SIGSYS on non-Linux platforms).
+//!
 //! On-disk layout for a server with ID `my_id`:
 //!
 //!   <base_dir>/raft-<my_id>/
@@ -9,8 +13,7 @@
 
 const std = @import("std");
 const mem = std.mem;
-const posix = std.posix;
-const linux = std.os.linux;
+const Io = std.Io;
 const types = @import("types.zig");
 const storage = @import("storage.zig");
 
@@ -23,50 +26,17 @@ const SnapshotData = storage.SnapshotData;
 const NULL_VOTED_FOR: u64 = 0xFFFF_FFFF_FFFF_FFFF;
 const WAL_ENTRY_HEADER_LEN: usize = 21;
 
-fn checkErrno(ret: usize) !void {
-    const e = linux.errno(ret);
-    if (e == .SUCCESS) return;
-    return error.Unexpected;
-}
-
-/// Loop until the whole buffer is written.
-fn writeAll(fd: posix.fd_t, buf: []const u8) !void {
-    var off: usize = 0;
-    while (off < buf.len) {
-        const ret = linux.write(fd, buf[off..].ptr, buf[off..].len);
-        const e = linux.errno(ret);
-        if (e != .SUCCESS) return error.Unexpected;
-        if (ret == 0) return error.Unexpected;
-        off += ret;
-    }
-}
-
-/// Loop until the whole buffer is read from the current file offset.
-fn readAll(fd: posix.fd_t, buf: []u8) !void {
-    var off: usize = 0;
-    while (off < buf.len) {
-        const n = try posix.read(fd, buf[off..]);
-        if (n == 0) return error.Unexpected;
-        off += n;
-    }
-}
-
-/// Loop until the whole buffer is pread from the given offset.
-fn preadAll(fd: posix.fd_t, buf: []u8, offset: i64) !void {
-    var off: usize = 0;
-    while (off < buf.len) {
-        const ret = linux.pread(fd, buf[off..].ptr, buf[off..].len, offset + @as(i64, @intCast(off)));
-        const e = linux.errno(ret);
-        if (e != .SUCCESS) return error.Unexpected;
-        if (ret == 0) return error.Unexpected;
-        off += ret;
-    }
-}
-
 pub const FileStorage = struct {
     allocator: std.mem.Allocator,
-    dir_fd: posix.fd_t,
-    wal_fd: posix.fd_t,
+    /// The I/O engine that backs all file operations.
+    io_storage: Io.Threaded,
+    io: Io,
+    /// The `raft-<id>` data directory.
+    dir: Io.Dir,
+    /// The WAL file, opened once for reading and appending.
+    wal: Io.File,
+    /// Current WAL length in bytes (append position).
+    wal_len: u64,
     server_id: ServerId,
     current_term: Term,
     voted_for: ?ServerId,
@@ -75,35 +45,28 @@ pub const FileStorage = struct {
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, base_dir: []const u8, server_id: ServerId) !Self {
+        var io_storage = Io.Threaded.init(allocator, .{});
+        errdefer io_storage.deinit();
+        const io = io_storage.io();
+
+        // Create <base_dir>/raft-<id> (mkdir -p style) and open it.
         var buf: [256]u8 = undefined;
-        const dirname = try std.fmt.bufPrintZ(&buf, "raft-{}", .{server_id});
+        const dirname = try std.fmt.bufPrint(&buf, "{s}/raft-{}", .{ base_dir, server_id });
+        const dir = try Io.Dir.createDirPathOpen(Io.Dir.cwd(), io, dirname, .{});
+        errdefer dir.close(io);
 
-        // Create base directory if needed.
-        var bbuf: [256]u8 = undefined;
-        const zbase = try std.fmt.bufPrintZ(&bbuf, "{s}", .{base_dir});
-        _ = linux.mkdirat(posix.AT.FDCWD, zbase, 0o755);
-        const base_fd = try posix.openat(posix.AT.FDCWD, base_dir, posix.O{ .DIRECTORY = true, .CLOEXEC = true }, 0);
-        errdefer _ = linux.close(base_fd);
-
-        // Create the raft-<id> subdirectory inside base_dir.
-        _ = linux.mkdirat(base_fd, dirname, 0o755);
-        const dir_fd = try posix.openat(base_fd, dirname, posix.O{ .DIRECTORY = true, .CLOEXEC = true }, 0);
-        errdefer _ = linux.close(dir_fd);
-        _ = linux.close(base_fd);
-
-        // Open WAL once for appending and reading.
-        const wal_fd = try posix.openat(dir_fd, "wal.bin", posix.O{
-            .ACCMODE = .RDWR,
-            .CREAT = true,
-            .APPEND = true,
-            .CLOEXEC = true,
-        }, 0o644);
-        errdefer _ = linux.close(wal_fd);
+        // Open (or create) the WAL without truncating existing data.
+        const wal = try Io.Dir.createFile(dir, io, "wal.bin", .{ .read = true, .truncate = false });
+        errdefer wal.close(io);
+        const wal_len = try wal.length(io);
 
         var self = Self{
             .allocator = allocator,
-            .dir_fd = dir_fd,
-            .wal_fd = wal_fd,
+            .io_storage = io_storage,
+            .io = io,
+            .dir = dir,
+            .wal = wal,
+            .wal_len = wal_len,
             .server_id = server_id,
             .current_term = 0,
             .voted_for = null,
@@ -115,8 +78,9 @@ pub const FileStorage = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        _ = linux.close(self.wal_fd);
-        _ = linux.close(self.dir_fd);
+        self.wal.close(self.io);
+        self.dir.close(self.io);
+        self.io_storage.deinit();
         self.* = undefined;
     }
 
@@ -153,7 +117,7 @@ pub const FileStorage = struct {
     }
 
     pub fn sync(ptr: *Self) !void {
-        try checkErrno(linux.fsync(ptr.wal_fd));
+        try ptr.wal.sync(ptr.io);
     }
 
     // ------------------------------------------------------------------
@@ -161,28 +125,26 @@ pub const FileStorage = struct {
     // ------------------------------------------------------------------
 
     pub fn storeSnapshot(ptr: *Self, last_included_index: LogIndex, last_included_term: Term, data: []const u8) !void {
-        const tmp_file = try posix.openat(ptr.dir_fd, "snapshot.tmp", posix.O{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o644);
-        defer _ = linux.close(tmp_file);
+        const tmp_file = try Io.Dir.createFile(ptr.dir, ptr.io, "snapshot.tmp", .{});
+        defer tmp_file.close(ptr.io);
 
         var header: [24]u8 = undefined;
         mem.writeInt(u64, header[0..8], last_included_index, .little);
         mem.writeInt(u64, header[8..16], last_included_term, .little);
         mem.writeInt(u64, header[16..24], @as(u64, @intCast(data.len)), .little);
 
-        try writeAll(tmp_file, &header);
-        if (data.len > 0) try writeAll(tmp_file, data);
-
-        try checkErrno(linux.fsync(tmp_file));
-        try checkErrno(linux.renameat(ptr.dir_fd, "snapshot.tmp", ptr.dir_fd, "snapshot.bin"));
-        try checkErrno(linux.fsync(ptr.dir_fd));
+        try tmp_file.writePositionalAll(ptr.io, &header, 0);
+        if (data.len > 0) try tmp_file.writePositionalAll(ptr.io, data, header.len);
+        try tmp_file.sync(ptr.io);
+        try Io.Dir.rename(ptr.dir, "snapshot.tmp", ptr.dir, "snapshot.bin", ptr.io);
     }
 
     pub fn loadSnapshot(ptr: *Self, allocator: std.mem.Allocator) ?SnapshotData {
-        const file = posix.openat(ptr.dir_fd, "snapshot.bin", posix.O{ .CLOEXEC = true }, 0) catch return null;
-        defer _ = linux.close(file);
+        const file = Io.Dir.openFile(ptr.dir, ptr.io, "snapshot.bin", .{}) catch return null;
+        defer file.close(ptr.io);
 
         var header: [24]u8 = undefined;
-        readAll(file, &header) catch return null;
+        _ = file.readPositionalAll(ptr.io, &header, 0) catch return null;
 
         const last_index = mem.readInt(u64, header[0..8], .little);
         const last_term = mem.readInt(u64, header[8..16], .little);
@@ -190,23 +152,23 @@ pub const FileStorage = struct {
 
         const data = if (data_len > 0) allocator.alloc(u8, data_len) catch return null else @as([]u8, &.{});
         errdefer if (data.len > 0) allocator.free(data);
-        if (data_len > 0) readAll(file, data) catch return null;
+        if (data_len > 0) _ = file.readPositionalAll(ptr.io, data, header.len) catch return null;
         return SnapshotData{ .last_included_index = last_index, .last_included_term = last_term, .data = data };
     }
 
     pub fn loadLastSnapshotIndex(ptr: *Self) LogIndex {
-        const file = posix.openat(ptr.dir_fd, "snapshot.bin", posix.O{ .CLOEXEC = true }, 0) catch return 0;
-        defer _ = linux.close(file);
+        const file = Io.Dir.openFile(ptr.dir, ptr.io, "snapshot.bin", .{}) catch return 0;
+        defer file.close(ptr.io);
         var header: [8]u8 = undefined;
-        if ((posix.read(file, &header) catch 0) < 8) return 0;
+        if ((file.readPositionalAll(ptr.io, &header, 0) catch 0) < 8) return 0;
         return mem.readInt(u64, &header, .little);
     }
 
     pub fn loadLastSnapshotTerm(ptr: *Self) Term {
-        const file = posix.openat(ptr.dir_fd, "snapshot.bin", posix.O{ .CLOEXEC = true }, 0) catch return 0;
-        defer _ = linux.close(file);
+        const file = Io.Dir.openFile(ptr.dir, ptr.io, "snapshot.bin", .{}) catch return 0;
+        defer file.close(ptr.io);
         var header: [16]u8 = undefined;
-        if ((posix.read(file, &header) catch 0) < 16) return 0;
+        if ((file.readPositionalAll(ptr.io, &header, 0) catch 0) < 16) return 0;
         return mem.readInt(u64, header[8..16], .little);
     }
 
@@ -215,23 +177,23 @@ pub const FileStorage = struct {
     // ------------------------------------------------------------------
 
     fn writeMetadata(self: *Self) !void {
-        const file = try posix.openat(self.dir_fd, "metadata.bin", posix.O{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o644);
-        defer _ = linux.close(file);
+        const file = try Io.Dir.createFile(self.dir, self.io, "metadata.bin", .{});
+        defer file.close(self.io);
         var data: [16]u8 = undefined;
         mem.writeInt(u64, data[0..8], self.current_term, .little);
         mem.writeInt(u64, data[8..16], self.voted_for orelse NULL_VOTED_FOR, .little);
-        try writeAll(file, &data);
-        try checkErrno(linux.fsync(file));
+        try file.writePositionalAll(self.io, &data, 0);
+        try file.sync(self.io);
     }
 
     fn loadMetadata(self: *Self) !void {
-        const file = posix.openat(self.dir_fd, "metadata.bin", posix.O{ .CLOEXEC = true }, 0) catch |err| switch (err) {
+        const file = Io.Dir.openFile(self.dir, self.io, "metadata.bin", .{}) catch |err| switch (err) {
             error.FileNotFound => return,
             else => |e| return e,
         };
-        defer _ = linux.close(file);
+        defer file.close(self.io);
         var data: [16]u8 = undefined;
-        if ((try posix.read(file, &data)) < 16) return;
+        if ((try file.readPositionalAll(self.io, &data, 0)) < 16) return;
         self.current_term = mem.readInt(u64, data[0..8], .little);
         const vf = mem.readInt(u64, data[8..16], .little);
         self.voted_for = if (vf == NULL_VOTED_FOR) null else vf;
@@ -247,22 +209,23 @@ pub const FileStorage = struct {
         mem.writeInt(u64, header[8..16], entry.term, .little);
         header[16] = @intFromEnum(entry.entry_type);
         mem.writeInt(u32, header[17..21], @as(u32, @intCast(entry.data.len)), .little);
-        try writeAll(self.wal_fd, &header);
-        if (entry.data.len > 0) try writeAll(self.wal_fd, entry.data);
-        try checkErrno(linux.fsync(self.wal_fd));
+
+        try self.wal.writePositionalAll(self.io, &header, self.wal_len);
+        self.wal_len += header.len;
+        if (entry.data.len > 0) {
+            try self.wal.writePositionalAll(self.io, entry.data, self.wal_len);
+            self.wal_len += entry.data.len;
+        }
+        try self.wal.sync(self.io);
     }
 
     fn readEntry(self: *Self, index: LogIndex, allocator: std.mem.Allocator) !?LogEntryOwned {
-        const file_size = blk: {
-            const sz = linux.lseek(self.wal_fd, 0, @intCast(posix.SEEK.END));
-            if (@as(i64, @bitCast(sz)) < 0) return null;
-            break :blk @as(u64, @intCast(sz));
-        };
+        const file_size = try self.wal.length(self.io);
 
         var pos: u64 = 0;
         while (pos < file_size) {
             var header: [WAL_ENTRY_HEADER_LEN]u8 = undefined;
-            try preadAll(self.wal_fd, &header, @intCast(pos));
+            _ = try self.wal.readPositionalAll(self.io, &header, pos);
             const entry_index = mem.readInt(u64, header[0..8], .little);
             const entry_term = mem.readInt(u64, header[8..16], .little);
             const entry_type: types.EntryType = @enumFromInt(header[16]);
@@ -270,7 +233,7 @@ pub const FileStorage = struct {
 
             if (entry_index == index) {
                 const data = if (data_len > 0) try allocator.alloc(u8, data_len) else @as([]u8, &.{});
-                if (data_len > 0) try preadAll(self.wal_fd, data, @intCast(pos + WAL_ENTRY_HEADER_LEN));
+                if (data_len > 0) _ = try self.wal.readPositionalAll(self.io, data, pos + WAL_ENTRY_HEADER_LEN);
                 return LogEntryOwned{ .term = entry_term, .index = entry_index, .entry_type = entry_type, .data = data };
             }
             pos += WAL_ENTRY_HEADER_LEN + data_len;
@@ -279,16 +242,12 @@ pub const FileStorage = struct {
     }
 
     fn rebuildLastLogIndex(self: *Self) !void {
-        const file_size = blk: {
-            const sz = linux.lseek(self.wal_fd, 0, @intCast(posix.SEEK.END));
-            if (@as(i64, @bitCast(sz)) < 0) return;
-            break :blk @as(u64, @intCast(sz));
-        };
+        const file_size = try self.wal.length(self.io);
 
         var pos: u64 = 0;
         while (pos < file_size) {
             var header: [WAL_ENTRY_HEADER_LEN]u8 = undefined;
-            preadAll(self.wal_fd, &header, @intCast(pos)) catch break;
+            _ = self.wal.readPositionalAll(self.io, &header, pos) catch break;
             const entry_index = mem.readInt(u64, header[0..8], .little);
             const data_len: usize = @intCast(mem.readInt(u32, header[17..21], .little));
             self.last_log_index = @max(self.last_log_index, entry_index);
@@ -311,21 +270,18 @@ pub const FileStorage = struct {
     }
 
     fn compactWal(self: *Self, boundary: LogIndex, keep_le: bool) !void {
-        const file_size = blk: {
-            const sz = linux.lseek(self.wal_fd, 0, @intCast(posix.SEEK.END));
-            if (@as(i64, @bitCast(sz)) < 0) return;
-            break :blk @as(u64, @intCast(sz));
-        };
+        const file_size = try self.wal.length(self.io);
         if (file_size == 0) return;
 
-        const tmp_file = try posix.openat(self.dir_fd, "wal.tmp", posix.O{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o644);
-        defer _ = linux.close(tmp_file);
+        const tmp_file = try Io.Dir.createFile(self.dir, self.io, "wal.tmp", .{});
+        defer tmp_file.close(self.io);
 
         var pos: u64 = 0;
         var highest_kept_index: LogIndex = 0;
+        var out_pos: u64 = 0;
         while (pos < file_size) {
             var header: [WAL_ENTRY_HEADER_LEN]u8 = undefined;
-            preadAll(self.wal_fd, &header, @intCast(pos)) catch break;
+            _ = self.wal.readPositionalAll(self.io, &header, pos) catch break;
             const entry_index = mem.readInt(u64, header[0..8], .little);
             const data_len: usize = @intCast(mem.readInt(u32, header[17..21], .little));
 
@@ -333,27 +289,26 @@ pub const FileStorage = struct {
             if (keep) {
                 const data = if (data_len > 0) try self.allocator.alloc(u8, data_len) else @as([]u8, &.{});
                 defer if (data.len > 0) self.allocator.free(data);
-                if (data_len > 0) try preadAll(self.wal_fd, data, @intCast(pos + WAL_ENTRY_HEADER_LEN));
+                if (data_len > 0) _ = try self.wal.readPositionalAll(self.io, data, pos + WAL_ENTRY_HEADER_LEN);
 
-                try writeAll(tmp_file, &header);
-                if (data.len > 0) try writeAll(tmp_file, data);
+                try tmp_file.writePositionalAll(self.io, &header, out_pos);
+                out_pos += header.len;
+                if (data.len > 0) {
+                    try tmp_file.writePositionalAll(self.io, data, out_pos);
+                    out_pos += data.len;
+                }
                 highest_kept_index = entry_index;
             }
             pos += WAL_ENTRY_HEADER_LEN + data_len;
         }
 
-        try checkErrno(linux.fsync(tmp_file));
-        try checkErrno(linux.renameat(self.dir_fd, "wal.tmp", self.dir_fd, "wal.bin"));
-        try checkErrno(linux.fsync(self.dir_fd));
+        try tmp_file.sync(self.io);
+        try Io.Dir.rename(self.dir, "wal.tmp", self.dir, "wal.bin", self.io);
 
-        // Re-open the renamed WAL.
-        _ = linux.close(self.wal_fd);
-        self.wal_fd = try posix.openat(self.dir_fd, "wal.bin", posix.O{
-            .ACCMODE = .RDWR,
-            .CREAT = true,
-            .APPEND = true,
-            .CLOEXEC = true,
-        }, 0o644);
+        // Re-open the renamed WAL and reset the append position.
+        self.wal.close(self.io);
+        self.wal = try Io.Dir.createFile(self.dir, self.io, "wal.bin", .{ .read = true, .truncate = false });
+        self.wal_len = try self.wal.length(self.io);
 
         if (keep_le) self.last_log_index = highest_kept_index;
     }
