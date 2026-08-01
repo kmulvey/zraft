@@ -22,9 +22,6 @@ jobs:
           - os: macos-latest
             arch: aarch64
             zig_version: "0.16.0"
-          - os: macos-13
-            arch: x86_64
-            zig_version: "0.16.0"
           - os: windows-latest
             arch: x86_64
             zig_version: "0.16.0"
