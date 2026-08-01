@@ -7,12 +7,27 @@ on:
 
 jobs:
   build-and-test:
-    name: Build & Test (Zig ${{ matrix.zig_version }})
-    runs-on: ubuntu-latest
+    name: Build & Test (${{ matrix.os }}/${{ matrix.arch }}, Zig ${{ matrix.zig_version }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        zig_version: ["0.16.0"]
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+            zig_version: "0.16.0"
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+            zig_version: "0.16.0"
+          - os: macos-latest
+            arch: aarch64
+            zig_version: "0.16.0"
+          - os: macos-13
+            arch: x86_64
+            zig_version: "0.16.0"
+          - os: windows-latest
+            arch: x86_64
+            zig_version: "0.16.0"
     steps:
       - uses: actions/checkout@v4
 
